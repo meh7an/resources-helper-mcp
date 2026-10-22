@@ -60,11 +60,15 @@ pub async fn serve(
     let upkeep = tokio::spawn(maintenance::run(state.clone(), options.maintenance));
 
     let mut requested = state.shutdown.subscribe();
+    let stopping = state.clone();
     let stop = async move {
         tokio::select! {
             () = shutdown => {}
             _ = requested.wait_for(|stop| *stop) => {}
         }
+        // Open acquire waits answer once this is set; graceful shutdown would otherwise wait
+        // them out, for up to their full timeout.
+        stopping.shutdown.send_replace(true);
     };
 
     tracing::info!("listening on {}", listener.local_addr()?);

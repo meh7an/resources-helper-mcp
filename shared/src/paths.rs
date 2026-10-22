@@ -19,6 +19,7 @@ const HOME_VAR: &str = "USERPROFILE";
 /// Nothing is created here; the daemon creates the directory on first start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
+    home: PathBuf,
     root: PathBuf,
 }
 
@@ -41,9 +42,17 @@ impl Paths {
 
     /// Paths rooted at `<base>\.resources-helper`, for tests and non-default installs.
     pub fn under(base: impl Into<PathBuf>) -> Self {
+        let home = base.into();
         Self {
-            root: base.into().join(APP_DIR),
+            root: home.join(APP_DIR),
+            home,
         }
+    }
+
+    /// The home directory the install lives under, which also holds Claude Code's `.claude`
+    /// directory and `.claude.json`.
+    pub fn home(&self) -> &Path {
+        &self.home
     }
 
     /// The `.resources-helper` directory itself.
@@ -91,6 +100,7 @@ mod tests {
         let home = PathBuf::from(r"C:\Users\someone");
         let paths = Paths::from_home(Some(home.clone().into_os_string())).unwrap();
         let root = home.join(".resources-helper");
+        assert_eq!(paths.home(), home);
         assert_eq!(paths.root(), root);
         assert_eq!(paths.bin_dir(), root.join("bin"));
         assert_eq!(paths.config_file(), root.join("config.toml"));

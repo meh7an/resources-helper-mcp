@@ -35,15 +35,32 @@ pub fn start() -> anyhow::Result<()> {
 /// Fails when rhd refuses the request or keeps answering after the wait.
 pub fn stop() -> anyhow::Result<()> {
     let client = BlockingClient::discover(false)?;
+    match shutdown(&client)? {
+        Some(_) => println!("rhd stopped"),
+        None => println!("rhd is not running"),
+    }
+    Ok(())
+}
+
+/// Asks the rhd behind `client` to shut down and waits until it stops answering. Returns its
+/// pid, or `None` when it was not running.
+///
+/// # Errors
+///
+/// Fails when rhd refuses the request or keeps answering after the wait.
+pub fn shutdown(client: &BlockingClient) -> anyhow::Result<Option<u32>> {
+    let pid = match client.health() {
+        Ok(health) => health.pid,
+        Err(error) if error.is_unsent() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     match client.shutdown() {
-        Err(error) if error.is_unsent() => {
-            println!("rhd is not running");
-            return Ok(());
-        }
+        Err(error) if error.is_unsent() => return Ok(None),
         other => other?,
     }
     let deadline = Instant::now() + STOP_WAIT;
-    while client.health().is_ok() {
+    // A session may start a new rhd the moment the old one exits; only the old one counts.
+    while client.health().is_ok_and(|health| health.pid == pid) {
         if Instant::now() >= deadline {
             bail!(
                 "rhd is still answering {} s after the shutdown request",
@@ -52,8 +69,7 @@ pub fn stop() -> anyhow::Result<()> {
         }
         thread::sleep(STOP_POLL);
     }
-    println!("rhd stopped");
-    Ok(())
+    Ok(Some(pid))
 }
 
 /// Reports whether rhd is running, without starting it.

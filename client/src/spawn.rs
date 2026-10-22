@@ -35,8 +35,13 @@ impl SpawnOptions {
             .ok()
             .and_then(|exe| exe.parent().map(|dir| dir.join(DAEMON_EXE)))
             .filter(|path| path.is_file());
+        Self::at(beside.unwrap_or_else(|| PathBuf::from(DAEMON_EXE)))
+    }
+
+    /// Starts `daemon_exe`, with the default ready timeout.
+    pub fn at(daemon_exe: PathBuf) -> Self {
         Self {
-            daemon_exe: beside.unwrap_or_else(|| PathBuf::from(DAEMON_EXE)),
+            daemon_exe,
             ready_timeout: DEFAULT_READY_TIMEOUT,
         }
     }

@@ -1,4 +1,4 @@
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
 
@@ -6,7 +6,9 @@ mod classes;
 mod daemon;
 mod history;
 mod hook;
+mod install;
 mod probe;
+mod registration;
 mod sample;
 mod status;
 
@@ -47,6 +49,21 @@ enum Command {
     /// Record this process's ancestry, environment, and optionally stdin to a file, or print
     /// live machine samples with `--sample`.
     Probe(probe::ProbeArgs),
+    /// Copy the built binaries into %USERPROFILE%\.resources-helper\bin, restart rhd on them
+    /// when it runs, copy the resource-guard skill, and print the remaining setup steps.
+    Install {
+        /// Directory holding the built rh.exe, rhd.exe, and rh-mcp.exe (default: this
+        /// executable's directory, such as target\release).
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+    },
+    /// Stop rhd, remove the binaries and the skill copy, and print the steps that unregister
+    /// the rest. Keeps the database, token, config, and logs.
+    Uninstall {
+        /// Also delete the database, token, config, and logs.
+        #[arg(long)]
+        purge: bool,
+    },
     /// Claude Code hooks. They always exit 0 and report a deny in their JSON output.
     Hook {
         #[command(subcommand)]
@@ -90,6 +107,8 @@ fn main() -> ExitCode {
             DaemonAction::Stop => daemon::stop(),
             DaemonAction::Status => daemon::status(),
         },
+        Command::Install { from } => install::install(from.as_deref()),
+        Command::Uninstall { purge } => install::uninstall(purge),
         Command::Probe(args) => probe::run(&args),
         Command::Hook {
             event: HookEvent::PreTool,

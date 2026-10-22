@@ -274,9 +274,10 @@ async fn wait_for_grant(
     // request already proves the holder is alive, so the wait keeps the lease from expiring.
     let renew_every = state.heartbeat_ttl() / 3;
     let mut renew_at = Instant::now() + renew_every;
+    let mut stopping = state.shutdown.subscribe();
     while is_queued(state, id).await {
         let now = Instant::now();
-        if now >= deadline {
+        if now >= deadline || *stopping.borrow() {
             break;
         }
         if now >= renew_at {
@@ -284,8 +285,13 @@ async fn wait_for_grant(
             renew_at = now + renew_every;
         }
         let wake = deadline.min(renew_at).saturating_duration_since(now);
-        if let Ok(Err(_)) = tokio::time::timeout(wake, changes.changed()).await {
-            break;
+        tokio::select! {
+            changed = tokio::time::timeout(wake, changes.changed()) => {
+                if let Ok(Err(_)) = changed {
+                    break;
+                }
+            }
+            _ = stopping.wait_for(|stop| *stop) => break,
         }
     }
     // A full TTL from the response gives the client time to start heartbeating.
@@ -295,7 +301,14 @@ async fn wait_for_grant(
         .with_db(move |conn| repo::get_lease(conn, id))
         .await?
         .ok_or_else(|| anyhow!("lease {} vanished from the database", id.0))?;
-    let verdict = lease_verdict(state, &lease).await;
+    let mut verdict = lease_verdict(state, &lease).await;
+    if lease.state == LeaseState::Queued && *stopping.borrow() {
+        verdict.reasons.push(format!(
+            "rhd is restarting; the lease keeps its place, so resume it with lease_id {} once \
+             rhd is back",
+            id.0
+        ));
+    }
     Ok(Json(AcquireResponse { lease, verdict }))
 }
 

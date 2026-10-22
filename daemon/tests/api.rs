@@ -204,6 +204,15 @@ impl Daemon {
     }
 
     async fn acquire(&self, holder: Holder, profile: ProfileSpec, wait_secs: u64) -> Response {
+        send(self.acquire_request(holder, profile, wait_secs)).await
+    }
+
+    fn acquire_request(
+        &self,
+        holder: Holder,
+        profile: ProfileSpec,
+        wait_secs: u64,
+    ) -> RequestBuilder {
         let request = AcquireRequest {
             holder,
             profile,
@@ -212,7 +221,7 @@ impl Daemon {
             cwd: None,
             wait_timeout_secs: wait_secs,
         };
-        send(self.post("/leases").json(&request)).await
+        self.post("/leases").json(&request)
     }
 
     async fn acquire_build(&self, holder: Holder, wait_secs: u64) -> AcquireResponse {
@@ -871,6 +880,59 @@ async fn test_released_run_raises_the_next_estimate_and_shows_in_history() {
     assert_eq!(second.lease.profile.ram_mb, 6_000);
     assert_eq!(second.verdict.reasons.len(), 2, "{:?}", second.verdict);
     daemon.stop().await;
+}
+
+/// Holds an active lease for alice and starts bob's acquire, which waits up to 60 s behind it.
+async fn open_acquire_wait(daemon: &Daemon) -> JoinHandle<Response> {
+    daemon.acquire_build(alice(), 0).await;
+    let profile = ProfileSpec::Class(JobClass::CpuHeavy);
+    let waiting = tokio::spawn(send(daemon.acquire_request(bob(), profile, 60)));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!waiting.is_finished());
+    waiting
+}
+
+/// The answer to an acquire wait cut short by a shutdown: still queued, with a resume hint.
+async fn assert_answered_for_restart(waiting: JoinHandle<Response>) {
+    let response = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let answer: AcquireResponse = response.json().await.unwrap();
+    assert_eq!(answer.lease.state, LeaseState::Queued);
+    let reasons = answer.verdict.reasons.join(" | ");
+    assert!(reasons.contains("rhd is restarting"), "{reasons}");
+}
+
+#[tokio::test]
+async fn test_shutdown_route_answers_open_acquire_waits_at_once() {
+    let mut daemon = Daemon::start().await;
+    let waiting = open_acquire_wait(&daemon).await;
+    let started = Instant::now();
+
+    let response = send(daemon.post("/shutdown")).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let server = daemon.server.take().unwrap();
+    let stopped = tokio::time::timeout(Duration::from_secs(5), server).await;
+    stopped.unwrap().unwrap().unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_answered_for_restart(waiting).await;
+}
+
+#[tokio::test]
+async fn test_external_shutdown_answers_open_acquire_waits_at_once() {
+    let daemon = Daemon::start().await;
+    let waiting = open_acquire_wait(&daemon).await;
+    let started = Instant::now();
+
+    tokio::time::timeout(Duration::from_secs(5), daemon.stop())
+        .await
+        .unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_answered_for_restart(waiting).await;
 }
 
 #[tokio::test]

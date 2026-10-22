@@ -1,3 +1,6 @@
+// No console window when the logon task starts rhd. Output goes to rhd.log, not the console.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::{fs, net::Ipv4Addr, time::Duration};
 
 use anyhow::Context;
