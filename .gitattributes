@@ -1,0 +1,2 @@
+# rustfmt.toml sets newline_style = "Unix"; keep checkouts LF on Windows too.
+* text=auto eol=lf
