@@ -19,7 +19,6 @@ use crate::{daemon, registration};
 /// The executables of an install.
 const BINARIES: [&str; 3] = ["rh.exe", "rhd.exe", "rh-mcp.exe"];
 const SKILL: &str = include_str!("../../skill/resource-guard/SKILL.md");
-const CLAUDE_MD_RULE: &str = include_str!("../../skill/claude-md-rule.md");
 const RULE_FILE: &str = "claude-md-rule.md";
 const SKILL_FILE: &str = "SKILL.md";
 /// How long to wait for a stopped rhd to exit. Older builds finish open acquire waits first,
@@ -70,7 +69,7 @@ pub fn install(from: Option<&Path>) -> anyhow::Result<()> {
     write_file(&skill, SKILL)?;
     println!("copied the resource-guard skill to {}", skill.display());
     let rule = paths.root().join(RULE_FILE);
-    write_file(&rule, CLAUDE_MD_RULE)?;
+    write_file(&rule, registration::CLAUDE_MD_RULE)?;
 
     if let Err(error) = restart_daemon(&paths) {
         println!(

@@ -159,11 +159,17 @@ fn test_install_marks_registered_steps_done() {
         },
     });
     fs::write(claude.join("settings.json"), settings.to_string()).unwrap();
-    fs::write(
-        claude.join("CLAUDE.md"),
-        "# Rules\n\n## Shared Machine Resources\n",
-    )
-    .unwrap();
+    // The rule's text under a different heading, as in a numbered contract.
+    let rule = include_str!("../../skill/claude-md-rule.md")
+        .split("```")
+        .nth(1)
+        .unwrap()
+        .trim_start_matches("markdown")
+        .replace(
+            "## Shared Machine Resources",
+            "## 11 — Shared Machine Resources",
+        );
+    fs::write(claude.join("CLAUDE.md"), format!("# Rules\n{rule}")).unwrap();
 
     let stdout = home.install();
 

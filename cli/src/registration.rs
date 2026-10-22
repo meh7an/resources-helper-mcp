@@ -16,8 +16,9 @@ use serde_json::{Value, json};
 const MCP_NAME: &str = "resources-helper";
 /// The name of the scheduled task that starts rhd at logon.
 const TASK_NAME: &str = "resources-helper";
-/// The heading of the section `skill/claude-md-rule.md` adds to the global CLAUDE.md.
-const RULE_HEADING: &str = "## Shared Machine Resources";
+/// The rule for the global CLAUDE.md, with how to add it; the section itself is the fenced
+/// block.
+pub const CLAUDE_MD_RULE: &str = include_str!("../../skill/claude-md-rule.md");
 const HOOK_ARGS: [&str; 2] = ["hook", "pre-tool"];
 
 /// Whether a step is already done, as far as rh can tell.
@@ -145,8 +146,9 @@ pub fn print_uninstall_steps(paths: &Paths) {
         ));
     }
     if rule_state(paths) != State::Missing {
+        let first_line = rule_body().lines().next().unwrap_or_default();
         steps.push(format!(
-            "Remove the \"{RULE_HEADING}\" section from {}",
+            "Remove the resources-helper rule (the section starting \"{first_line}\") from {}",
             claude_md(paths).display()
         ));
     }
@@ -180,11 +182,32 @@ fn hook_state(paths: &Paths) -> State {
 
 fn rule_state(paths: &Paths) -> State {
     let found = match fs::read_to_string(claude_md(paths)) {
-        Ok(text) => Some(text.contains(RULE_HEADING)),
+        Ok(text) => Some(has_rule(&text)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
         Err(_) => None,
     };
     State::from_lookup(found)
+}
+
+/// The rule's text without its heading: the lines of the fenced block after the `#` line.
+fn rule_body() -> &'static str {
+    let block = CLAUDE_MD_RULE
+        .split_once("```markdown")
+        .and_then(|(_, rest)| rest.split_once("```"))
+        .map_or(CLAUDE_MD_RULE, |(block, _)| block);
+    let block = block.trim_start();
+    let body = match block.split_once('\n') {
+        Some((first, rest)) if first.starts_with('#') => rest,
+        _ => block,
+    };
+    body.trim()
+}
+
+/// Whether `claude_md` holds the rule's text. The heading is not compared, so a renamed or
+/// numbered section still counts, and line wrapping and line endings do not matter.
+fn has_rule(claude_md: &str) -> bool {
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    words(claude_md).contains(&words(rule_body()))
 }
 
 /// Asks Task Scheduler for the task; any failure to run `schtasks` is [`State::Unknown`].
@@ -354,6 +377,41 @@ mod tests {
         );
         assert_eq!(hook["args"], json!(["hook", "pre-tool"]));
         assert_eq!(entry["matcher"], "Bash|PowerShell");
+    }
+
+    #[test]
+    fn test_rule_body_is_the_fenced_section_without_its_heading() {
+        let body = rule_body();
+        assert!(
+            body.starts_with("This PC is shared by several Claude sessions"),
+            "{body}"
+        );
+        assert!(
+            body.ends_with("it is not a state-changing command."),
+            "{body}"
+        );
+        assert!(!body.contains('#') && !body.contains("```"), "{body}");
+    }
+
+    #[test]
+    fn test_has_rule_ignores_the_heading_wrapping_and_line_endings() {
+        let renamed = format!(
+            "# Contract\n\n## 11 — Shared Machine Resources\n\n{}\n",
+            rule_body()
+        );
+        assert!(has_rule(&renamed));
+        let rewrapped = rule_body().replace('\n', " ").replace(" - ", "\r\n- ");
+        assert!(has_rule(&format!(
+            "## Shared\r\n\r\n{rewrapped}\r\n## Next"
+        )));
+    }
+
+    #[test]
+    fn test_has_rule_needs_the_text_not_only_the_heading() {
+        assert!(!has_rule("# Rules\n\n## Shared Machine Resources\n"));
+        let without_last_bullet = rule_body().rsplit_once("\n- ").unwrap().0;
+        assert!(!has_rule(without_last_bullet));
+        assert!(!has_rule(""));
     }
 
     #[test]
