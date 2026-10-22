@@ -16,7 +16,8 @@ use rh_shared::{
 
 use crate::{
     admission::{self, Room, Running},
-    benchmark::{BenchmarkRun, Quiet, QuietLimits, QuietWindow, RunMeter},
+    benchmark::{Quiet, QuietLimits, QuietWindow},
+    meter::{MeteredRun, RunMeter},
 };
 
 /// The config values the ledger works with, with times in milliseconds.
@@ -85,14 +86,14 @@ pub enum LedgerError {
     AlreadyTracked(LeaseId),
 }
 
-/// A lease its holder ended, with what it measured if it was a benchmark.
+/// A lease its holder ended, with what it measured while it was active.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Released {
     /// The lease in its final state.
     pub lease: Lease,
-    /// Noise and holder usage of an active benchmark lease; `None` for other leases, for a
-    /// benchmark released while queued, and when no sample arrived while it was active.
-    pub benchmark: Option<BenchmarkRun>,
+    /// Holder usage and noise of the run; `None` for a lease released while queued and when
+    /// no sample arrived while it was active.
+    pub run: Option<MeteredRun>,
 }
 
 /// Queued and active leases, in the order they were enqueued.
@@ -101,7 +102,8 @@ pub struct Ledger {
     settings: LedgerSettings,
     leases: Vec<Lease>,
     quiet: QuietWindow,
-    meter: Option<RunMeter>,
+    /// One per active lease.
+    meters: Vec<RunMeter>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,7 +154,7 @@ impl Ledger {
             settings,
             leases: Vec::new(),
             quiet: QuietWindow::default(),
-            meter: None,
+            meters: Vec::new(),
         }
     }
 
@@ -211,18 +213,16 @@ impl Ledger {
         let mut lease = self.leases.remove(index);
         lease.state = LeaseState::Released;
         lease.ended_at_ms = Some(now_ms);
-        let benchmark = match self.meter.take() {
-            Some(meter) if meter.lease_id() == id => meter.finish(),
-            other => {
-                self.meter = other;
-                None
-            }
-        };
-        Ok(Released { lease, benchmark })
+        let run = self
+            .meters
+            .iter()
+            .position(|meter| meter.lease_id() == id)
+            .and_then(|index| self.meters.remove(index).finish());
+        Ok(Released { lease, run })
     }
 
     /// Expires leases whose holder died or whose heartbeat stopped, feeds `snapshot` to the
-    /// quiet window and to the running benchmark's meter, and grants every queued lease that
+    /// quiet window and to the meters of active leases, and grants every queued lease that
     /// may start now.
     pub fn tick(
         &mut self,
@@ -234,7 +234,7 @@ impl Ledger {
         let drained = self.active().is_empty();
         self.quiet
             .observe(now_ms, snapshot, drained, self.settings.quiet.window_ms);
-        if let Some(meter) = &mut self.meter {
+        for meter in &mut self.meters {
             meter.observe(snapshot);
         }
 
@@ -255,14 +255,15 @@ impl Ledger {
             };
             lease.state = LeaseState::Active;
             lease.granted_at_ms = Some(now_ms);
-            let reason = if lease.kind == LeaseKind::BenchmarkExclusive {
-                let quiet_at_start = matches!(quiet, Some(Quiet::Quiet(_)));
-                self.meter = Some(RunMeter::start(
-                    id,
-                    lease.holder.session.clone(),
-                    quiet_at_start,
-                    snapshot,
-                ));
+            let is_benchmark = lease.kind == LeaseKind::BenchmarkExclusive;
+            let quiet_at_start = matches!(quiet, Some(Quiet::Quiet(_)));
+            self.meters.push(RunMeter::start(
+                id,
+                lease.holder.session.clone(),
+                quiet_at_start,
+                snapshot,
+            ));
+            let reason = if is_benchmark {
                 grant_reason(&self.settings.quiet, quiet)
             } else {
                 "granted".to_owned()
@@ -273,7 +274,19 @@ impl Ledger {
                 reason,
             });
         }
+        self.mark_overlaps();
         transitions
+    }
+
+    /// The most a single request could get once every active lease ended: usable capacity
+    /// minus the background load.
+    pub fn ceiling(&self, snapshot: &Snapshot) -> Room {
+        let active = self.active();
+        let mut room = Room::measure(snapshot, &active, self.settings.headroom_pct);
+        for lease in &active {
+            room.release(&lease.profile);
+        }
+        room
     }
 
     /// Whether a new request for `profile` would start now if it joined the back of the
@@ -384,14 +397,32 @@ impl Ledger {
             });
             false
         });
-        let metered_ended = self
-            .meter
-            .as_ref()
-            .is_some_and(|meter| self.leases.iter().all(|lease| lease.id != meter.lease_id()));
-        if metered_ended {
-            self.meter = None;
-        }
+        let leases = &self.leases;
+        self.meters
+            .retain(|meter| leases.iter().any(|lease| lease.id == meter.lease_id()));
         transitions
+    }
+
+    /// Flags the meters of sessions that hold more than one active lease: their usage is
+    /// measured per session, so it no longer belongs to one job.
+    fn mark_overlaps(&mut self) {
+        let active = self.active();
+        let shared: Vec<SessionKey> = active
+            .iter()
+            .filter(|lease| {
+                active
+                    .iter()
+                    .filter(|other| other.holder.session == lease.holder.session)
+                    .count()
+                    > 1
+            })
+            .map(|lease| lease.holder.session.clone())
+            .collect();
+        for meter in &mut self.meters {
+            if shared.contains(meter.session()) {
+                meter.mark_overlapped();
+            }
+        }
     }
 
     fn active(&self) -> Vec<&Lease> {
@@ -807,7 +838,7 @@ mod tests {
         let released = ledger.release(LeaseId(1), &session("s"), 5_000).unwrap();
         assert_eq!(released.lease.state, LeaseState::Released);
         assert_eq!(released.lease.ended_at_ms, Some(5_000));
-        assert_eq!(released.benchmark, None);
+        assert_eq!(released.run, None);
         assert_eq!(granted(&ledger.tick(6_000, &idle(), &alive())), [2]);
         assert_eq!(states(&ledger), [(2, LeaseState::Active)]);
     }
@@ -940,7 +971,7 @@ mod tests {
         let released = ledger
             .release(LeaseId(1), &session("bench"), 63_000)
             .unwrap();
-        assert!(!released.benchmark.unwrap().noise.quiet_at_start);
+        assert!(!released.run.unwrap().noise.quiet_at_start);
     }
 
     #[test]
@@ -957,12 +988,77 @@ mod tests {
         let released = ledger
             .release(LeaseId(1), &session("bench"), 13_000)
             .unwrap();
-        let run = released.benchmark.unwrap();
+        let run = released.run.unwrap();
         // 0.32 of 16 cores is 2%; the holder's own 8 cores are not noise.
         assert!((run.noise.avg_cpu_pct - 2.0).abs() < 1e-4, "{run:?}");
         assert!(run.noise.quiet_at_start);
         assert_eq!(run.holder_peak.cores, 8.0);
         assert_eq!(run.holder_avg.cores, 8.0);
+    }
+
+    #[test]
+    fn test_normal_release_reports_holder_usage() {
+        let mut ledger = Ledger::new(settings());
+        enqueue(&mut ledger, 1, 8.0, 300, 0);
+        assert_eq!(tick_seconds(&mut ledger, 0, 0, 0.0), [1]);
+        for (second, cores) in [(1, 4.0), (2, 12.0)] {
+            let mut busy_sample = sample(second * 1_000, 50.0);
+            busy_sample.sessions = vec![session_usage("s", cores)];
+            ledger.tick(second * 1_000, &busy_sample, &alive());
+        }
+
+        let run = ledger
+            .release(LeaseId(1), &session("s"), 3_000)
+            .unwrap()
+            .run
+            .unwrap();
+        assert_eq!(run.holder_peak.cores, 12.0);
+        assert_eq!(run.holder_avg.cores, 8.0);
+        assert!(!run.overlapped);
+    }
+
+    #[test]
+    fn test_second_active_lease_of_a_session_marks_both_runs_overlapped() {
+        let mut ledger = Ledger::new(settings());
+        enqueue(&mut ledger, 1, 2.0, 300, 0);
+        let other = queued_lease(2, "other", timed(2.0, 300), LeaseKind::Normal, 0);
+        ledger.enqueue(other).unwrap();
+        assert_eq!(tick_seconds(&mut ledger, 0, 1, 0.0), [1, 2]);
+        enqueue(&mut ledger, 3, 2.0, 300, 2_000);
+        assert_eq!(tick_seconds(&mut ledger, 2, 3, 0.0), [3]);
+
+        // Lease 3 ended before lease 1, but lease 1 still shared the session with it.
+        let third = ledger.release(LeaseId(3), &session("s"), 4_000).unwrap();
+        tick_seconds(&mut ledger, 4, 5, 0.0);
+        let first = ledger.release(LeaseId(1), &session("s"), 6_000).unwrap();
+        let alone = ledger
+            .release(LeaseId(2), &session("other"), 6_000)
+            .unwrap();
+        assert!(third.run.unwrap().overlapped);
+        assert!(first.run.unwrap().overlapped);
+        assert!(!alone.run.unwrap().overlapped);
+    }
+
+    #[test]
+    fn test_expired_lease_drops_its_meter() {
+        let mut ledger = Ledger::new(settings());
+        enqueue(&mut ledger, 1, 2.0, 300, 0);
+        assert_eq!(tick_seconds(&mut ledger, 0, 1, 0.0), [1]);
+        let dead = Dead(HashSet::from([holder("s").pid]));
+        ledger.tick(2_000, &sample(2_000, 0.0), &dead);
+        assert!(ledger.meters.is_empty());
+    }
+
+    #[test]
+    fn test_ceiling_is_the_room_with_every_active_lease_ended() {
+        let mut ledger = Ledger::new(settings());
+        enqueue(&mut ledger, 1, 8.0, 300, 0);
+        ledger.tick(0, &idle(), &alive());
+        // 16 cores less 10% headroom; lease 1's reservation does not count.
+        let ceiling = ledger.ceiling(&idle());
+        assert!((ceiling.cores - 14.4).abs() < 1e-6, "{ceiling:?}");
+        let busy_ceiling = ledger.ceiling(&busy());
+        assert!((busy_ceiling.cores - 6.4).abs() < 1e-6, "{busy_ceiling:?}");
     }
 
     #[test]

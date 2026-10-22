@@ -124,6 +124,13 @@ pub struct CanFitParams {
     /// How the job shares the machine (default normal).
     #[serde(default)]
     pub kind: KindParam,
+    /// The command, for example `cargo build --release`. With it, the estimate also uses
+    /// what earlier runs of the same command in the same directory needed.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Directory the command runs in (default: the session's working directory).
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Parameters of `acquire_lease`.
@@ -143,6 +150,10 @@ pub struct AcquireParams {
     /// Required for a new lease.
     #[serde(default)]
     pub label: String,
+    /// Directory the command runs in (default: the session's working directory). Earlier
+    /// runs of the same command there can raise the reserved profile.
+    #[serde(default)]
+    pub cwd: Option<String>,
     /// Seconds to wait for the lease to start before returning it still queued (default 60,
     /// at most 120).
     #[serde(default)]
@@ -241,6 +252,7 @@ mod tests {
             "ram_mb",
             "kind",
             "label",
+            "cwd",
             "wait_secs",
         ] {
             assert!(properties.contains_key(field), "{field} missing: {schema}");

@@ -27,6 +27,7 @@ diesel::table! {
         noise_avg_gpu_pct -> Nullable<Float>,
         noise_peak_gpu_pct -> Nullable<Float>,
         noise_quiet_at_start -> Nullable<Bool>,
+        overlapped -> Bool,
     }
 }
 
@@ -60,6 +61,7 @@ diesel::table! {
         granted_at_ms -> Nullable<BigInt>,
         ended_at_ms -> Nullable<BigInt>,
         expires_at_ms -> BigInt,
+        cwd -> Text,
     }
 }
 

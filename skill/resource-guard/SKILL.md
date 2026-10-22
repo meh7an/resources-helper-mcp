@@ -59,12 +59,14 @@ Light, never leased: reading and searching files, `git`, `cargo check`, `cargo c
 ## The loop: check, lease, run, release
 
 1. **Classify** the command (above). Light: just run it.
-2. **Optionally check** with `can_fit` (same `class` or profile, and `kind`) when the
-   answer changes what you do, for example to choose between a full build now and a narrower
-   one (`-p <crate>`), or to tell the user up front that the machine is busy. It changes
-   nothing and holds no place in the queue.
+2. **Optionally check** with `can_fit` (same `class` or profile, `kind`, and the command as
+   `label`) when the answer changes what you do, for example to choose between a full build
+   now and a narrower one (`-p <crate>`), or to tell the user up front that the machine is
+   busy. It changes nothing and holds no place in the queue.
 3. **Acquire**: `acquire_lease` with `class` (or a custom profile) and `label` set to the
    exact command, for example `cargo test --workspace`. `wait_secs` defaults to 60, at most 120.
+   When the command runs somewhere other than the session's directory, pass that directory
+   as `cwd`.
 4. **Run** the command only when the result's `state` is `active`. A `queued` result keeps
    its place: follow "Waiting on a queued lease" below. Never acquire a second lease for the
    same work while one is queued.
@@ -126,6 +128,13 @@ is never handed out.
 So `can_fit` is the authority on whether a job starts; the snapshot explains why (who is
 busy, whether the load is another session's lease or unrelated background like a game).
 Mention it to the user when unrelated background load is what blocks you.
+
+The daemon also learns from history. Every released lease records what its session used,
+keyed by the command and its directory, so `label` must be the real command. When earlier
+runs of the same command needed more than the declared class, the lease reserves the larger
+values (p90 of past runs, capped at what the machine can free), and the first `reasons` say
+so, for example "cores 11.2 from p90 of 4 past run(s) (declared 8.0)". That is expected, not
+an error. `rh history` shows what each job needed.
 
 ## Benchmarks
 

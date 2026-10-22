@@ -6,12 +6,12 @@
 use anyhow::{Context, anyhow, bail};
 use diesel::prelude::*;
 use rh_shared::types::{
-    Holder, JobClass, JobProfile, Lease, LeaseId, LeaseKind, LeaseState, NoiseReport,
+    Holder, JobClass, JobProfile, JobRun, Lease, LeaseId, LeaseKind, LeaseState, NoiseReport,
     ResourceUsage, SessionKey,
 };
 
 use super::{
-    repo::{JobRun, LeaseDraft, LeaseEvent},
+    repo::{LeaseDraft, LeaseEvent},
     schema::{job_runs, lease_events, leases},
 };
 
@@ -35,6 +35,7 @@ pub(super) struct LeaseRow {
     granted_at_ms: Option<i64>,
     ended_at_ms: Option<i64>,
     expires_at_ms: i64,
+    cwd: String,
 }
 
 impl TryFrom<LeaseRow> for Lease {
@@ -71,6 +72,7 @@ impl TryFrom<LeaseRow> for Lease {
                 est_secs: from_column(row.est_secs, "leases.est_secs")?,
             },
             label: row.label,
+            cwd: row.cwd,
             requested_at_ms: row.requested_at_ms,
             granted_at_ms: row.granted_at_ms,
             ended_at_ms: row.ended_at_ms,
@@ -95,6 +97,7 @@ pub(super) struct NewLeaseRow<'a> {
     vram_mb: i64,
     est_secs: i64,
     label: &'a str,
+    cwd: &'a str,
     requested_at_ms: i64,
     expires_at_ms: i64,
 }
@@ -114,6 +117,7 @@ impl<'a> NewLeaseRow<'a> {
             vram_mb: to_column(draft.profile.vram_mb, "profile.vram_mb")?,
             est_secs: to_column(draft.profile.est_secs, "profile.est_secs")?,
             label: &draft.label,
+            cwd: &draft.cwd,
             requested_at_ms: draft.requested_at_ms,
             expires_at_ms: draft.expires_at_ms,
         })
@@ -205,6 +209,7 @@ pub(super) struct JobRunRow {
     noise_avg_gpu_pct: Option<f32>,
     noise_peak_gpu_pct: Option<f32>,
     noise_quiet_at_start: Option<bool>,
+    overlapped: bool,
 }
 
 impl TryFrom<JobRunRow> for JobRun {
@@ -261,6 +266,7 @@ impl TryFrom<JobRunRow> for JobRun {
             started_at_ms: row.started_at_ms,
             ended_at_ms: row.ended_at_ms,
             noise,
+            overlapped: row.overlapped,
         })
     }
 }
@@ -292,6 +298,7 @@ pub(super) struct NewJobRunRow<'a> {
     noise_avg_gpu_pct: Option<f32>,
     noise_peak_gpu_pct: Option<f32>,
     noise_quiet_at_start: Option<bool>,
+    overlapped: bool,
 }
 
 impl<'a> NewJobRunRow<'a> {
@@ -321,6 +328,7 @@ impl<'a> NewJobRunRow<'a> {
             noise_avg_gpu_pct: run.noise.map(|noise| noise.avg_gpu_pct),
             noise_peak_gpu_pct: run.noise.map(|noise| noise.peak_gpu_pct),
             noise_quiet_at_start: run.noise.map(|noise| noise.quiet_at_start),
+            overlapped: run.overlapped,
         })
     }
 }

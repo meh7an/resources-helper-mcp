@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Holder, JobClass, JobProfile, Lease, LeaseKind, LeaseState, NoiseReport, SessionKey,
+    Holder, JobClass, JobProfile, JobRun, Lease, LeaseKind, LeaseState, NoiseReport, SessionKey,
     SessionUsage,
 };
 
@@ -28,12 +28,18 @@ pub enum ProfileSpec {
 }
 
 /// Body of `POST /can-fit`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanFitRequest {
     /// Resources the job needs.
     pub profile: ProfileSpec,
     /// How the job would share the machine.
     pub kind: LeaseKind,
+    /// The command, so the daemon can raise the profile from similar past runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Working directory of the command; part of what makes runs similar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// The admission engine's answer. Response of `POST /can-fit`.
@@ -98,6 +104,9 @@ pub struct AcquireRequest {
     pub kind: LeaseKind,
     /// What the lease is for, usually the command that will run.
     pub label: String,
+    /// Working directory of the command; part of what makes runs similar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     /// How long the daemon may hold the request open waiting for the lease to become active.
     pub wait_timeout_secs: u64,
 }
@@ -179,6 +188,49 @@ pub struct RegisterSessionRequest {
     pub holder: Holder,
 }
 
+/// Response of `GET /history`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryResponse {
+    /// One entry per fingerprint, most recently run first.
+    pub jobs: Vec<JobSummary>,
+}
+
+/// What the history knows about one fingerprint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobSummary {
+    /// Normalized command plus working directory.
+    pub fingerprint: String,
+    /// Label of the most recent run.
+    pub command: String,
+    /// Working directory of the most recent run.
+    pub cwd: String,
+    /// Stored runs.
+    pub runs: u32,
+    /// Runs the estimate is based on: the most recent ones without an overlapping lease.
+    pub estimate_runs: u32,
+    /// End of the most recent run, in milliseconds since the Unix epoch.
+    pub last_ended_at_ms: i64,
+    /// What the runs needed: p90 of peak memory, of average CPU and GPU load, and of run
+    /// time. `None` when every run overlapped another lease.
+    pub learned: Option<JobProfile>,
+}
+
+/// Query string of `GET /history/runs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryRunsQuery {
+    /// Fingerprint whose runs to list.
+    pub fingerprint: String,
+    /// Most runs to return; the daemon's default when absent.
+    pub limit: Option<u32>,
+}
+
+/// Response of `GET /history/runs`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryRunsResponse {
+    /// Runs with the fingerprint, newest first.
+    pub runs: Vec<JobRun>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,11 +271,22 @@ mod tests {
         assert_json_round_trip(&CanFitRequest {
             profile: ProfileSpec::Class(JobClass::GpuHeavy),
             kind: LeaseKind::Normal,
+            label: None,
+            cwd: None,
         });
         assert_json_round_trip(&CanFitRequest {
             profile: custom_profile(),
             kind: LeaseKind::BenchmarkExclusive,
+            label: Some("cargo bench".into()),
+            cwd: Some(r"E:\work\app".into()),
         });
+    }
+
+    #[test]
+    fn test_can_fit_request_without_label_and_cwd_deserializes_as_none() {
+        let request: CanFitRequest =
+            serde_json::from_str(r#"{"profile":{"class":"light"},"kind":"normal"}"#).unwrap();
+        assert_eq!((request.label, request.cwd), (None, None));
     }
 
     #[test]
@@ -291,6 +354,7 @@ mod tests {
             profile: custom_profile(),
             kind: LeaseKind::Normal,
             label: "cargo build --release".into(),
+            cwd: Some(r"E:\work\app".into()),
             wait_timeout_secs: 30,
         });
     }
@@ -370,6 +434,36 @@ mod tests {
         assert_json_round_trip(&SessionsResponse {
             sessions: vec![sample_session_usage()],
         });
+    }
+
+    #[test]
+    fn test_history_dtos_json_round_trip_preserve_every_field() {
+        let summary = JobSummary {
+            fingerprint: r"cargo build|e:\work\app".into(),
+            command: "cargo build".into(),
+            cwd: r"E:\work\app".into(),
+            runs: 5,
+            estimate_runs: 4,
+            last_ended_at_ms: 1_793_000_095_000,
+            learned: match custom_profile() {
+                ProfileSpec::Custom(profile) => Some(profile),
+                _ => None,
+            },
+        };
+        assert_json_round_trip(&HistoryResponse {
+            jobs: vec![
+                summary.clone(),
+                JobSummary {
+                    learned: None,
+                    ..summary
+                },
+            ],
+        });
+        assert_json_round_trip(&HistoryRunsQuery {
+            fingerprint: "cargo build|".into(),
+            limit: Some(10),
+        });
+        assert_json_round_trip(&HistoryRunsResponse { runs: Vec::new() });
     }
 
     #[test]

@@ -17,12 +17,12 @@ use reqwest::{RequestBuilder, Response};
 use rh_shared::{
     api::{
         AcquireRequest, AcquireResponse, CanFitRequest, HealthResponse, HeartbeatResponse,
-        LeaseQuery, LeasesResponse, RegisterSessionRequest, ReleaseResponse, SessionsResponse,
-        Verdict, WaitRequest,
+        HistoryResponse, HistoryRunsResponse, JobSummary, LeaseQuery, LeasesResponse,
+        RegisterSessionRequest, ReleaseResponse, SessionsResponse, Verdict, WaitRequest,
     },
     config::Config,
     paths::Paths,
-    types::{Holder, Lease, LeaseId, SessionKey, SessionUsage, Snapshot},
+    types::{Holder, JobRun, Lease, LeaseId, SessionKey, SessionUsage, Snapshot},
 };
 use serde::de::DeserializeOwned;
 
@@ -287,6 +287,29 @@ impl Client {
             format!("/leases?{}", params.join("&"))
         };
         Ok(self.get::<LeasesResponse>(&path).await?.leases)
+    }
+
+    /// `GET /history`: one summary per job fingerprint, most recently run first.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`].
+    pub async fn history(&self) -> Result<Vec<JobSummary>> {
+        Ok(self.get::<HistoryResponse>("/history").await?.jobs)
+    }
+
+    /// `GET /history/runs`: runs with `fingerprint`, newest first; the daemon's default count
+    /// when `limit` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`].
+    pub async fn history_runs(&self, fingerprint: &str, limit: Option<u32>) -> Result<Vec<JobRun>> {
+        let mut path = format!("/history/runs?fingerprint={}", encode(fingerprint));
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
+        }
+        Ok(self.get::<HistoryRunsResponse>(&path).await?.runs)
     }
 
     /// `GET /sessions`.

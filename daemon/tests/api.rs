@@ -14,8 +14,8 @@ use rh_core::sampler::{RawProcess, RawSample, Sampler};
 use rh_shared::{
     api::{
         AcquireRequest, AcquireResponse, BenchmarkProgress, CanFitRequest, HealthResponse,
-        HeartbeatResponse, LeasesResponse, ProfileSpec, RegisterSessionRequest, ReleaseResponse,
-        SessionsResponse, Verdict, WaitRequest,
+        HeartbeatResponse, HistoryResponse, HistoryRunsResponse, LeasesResponse, ProfileSpec,
+        RegisterSessionRequest, ReleaseResponse, SessionsResponse, Verdict, WaitRequest,
     },
     config::Config,
     types::{
@@ -190,6 +190,7 @@ impl Daemon {
             profile,
             kind: LeaseKind::Normal,
             label: "cargo build".into(),
+            cwd: None,
             wait_timeout_secs: wait_secs,
         };
         send(self.post("/leases").json(&request)).await
@@ -215,6 +216,7 @@ impl Daemon {
             }),
             kind: LeaseKind::BenchmarkExclusive,
             label: "cargo bench".into(),
+            cwd: None,
             wait_timeout_secs: wait_secs,
         };
         let response = send(self.post("/leases").json(&request)).await;
@@ -490,6 +492,8 @@ async fn test_can_fit_reports_the_shortfall() {
     let request = CanFitRequest {
         profile: ProfileSpec::Class(JobClass::CpuHeavy),
         kind: LeaseKind::Normal,
+        label: None,
+        cwd: None,
     };
     let can_fit = || send(daemon.post("/can-fit").json(&request));
     let verdict: Verdict = can_fit().await.json().await.unwrap();
@@ -518,6 +522,7 @@ async fn test_leases_left_from_a_previous_run_expire_on_startup() {
                 est_secs: 10,
             },
             label: "old build".into(),
+            cwd: String::new(),
             requested_at_ms: 1,
             expires_at_ms: 2,
         };
@@ -586,7 +591,7 @@ async fn test_benchmark_on_a_quiet_machine_reports_and_stores_its_noise() {
 
     let pool = open_pool(&daemon._dir.path().join("rh.db")).unwrap();
     let mut conn = pool.get().unwrap();
-    let runs = repo::recent_job_runs(&mut conn, "cargo bench", 10).unwrap();
+    let runs = repo::recent_job_runs(&mut conn, "cargo bench|", 10).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].lease_id, Some(lease.id));
     assert_eq!(runs[0].noise, Some(noise));
@@ -633,6 +638,68 @@ async fn test_benchmark_on_a_busy_machine_is_granted_without_quiet() {
         "{events:?}"
     );
     Arc::into_inner(daemon).unwrap().stop().await;
+}
+
+#[tokio::test]
+async fn test_released_run_raises_the_next_estimate_and_shows_in_history() {
+    let daemon = Daemon::start().await;
+    let set_alice_usage = |cores, ram_mb| {
+        let mut machine = daemon.machine.lock().unwrap();
+        machine.processes[0].usage = ResourceUsage {
+            cores,
+            ram_mb,
+            ..ResourceUsage::default()
+        };
+    };
+    // Set before the grant, so every sample of the run sees the load.
+    set_alice_usage(12.0, 6_000);
+    let first = daemon.acquire_build(alice(), 0).await;
+    assert_eq!(first.lease.profile.cores, 8.0);
+    assert!(first.verdict.reasons.is_empty(), "{:?}", first.verdict);
+    // About ten samples while the build runs.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    set_alice_usage(0.0, 0);
+    let released = daemon.release_response(first.lease.id, "alice").await;
+    assert_eq!(released.noise, None);
+
+    let history: HistoryResponse = daemon.get("/history").await.json().await.unwrap();
+    assert_eq!(history.jobs.len(), 1);
+    let job = &history.jobs[0];
+    assert_eq!((job.fingerprint.as_str(), job.runs), ("cargo build|", 1));
+    assert_eq!(job.learned.map(|profile| profile.ram_mb), Some(6_000));
+
+    let path = "/history/runs?fingerprint=cargo%20build%7C&limit=5";
+    let runs: HistoryRunsResponse = daemon.get(path).await.json().await.unwrap();
+    assert_eq!(runs.runs.len(), 1);
+    assert_eq!(runs.runs[0].lease_id, Some(first.lease.id));
+    assert!(!runs.runs[0].overlapped);
+
+    // A differently written command line of the same job finds the run.
+    let request = CanFitRequest {
+        profile: ProfileSpec::Class(JobClass::CpuHeavy),
+        kind: LeaseKind::Normal,
+        label: Some("cd app && cargo build 2>&1".into()),
+        cwd: None,
+    };
+    let verdict: Verdict = send(daemon.post("/can-fit").json(&request))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(verdict.fits, "{verdict:?}");
+    assert_eq!(
+        verdict.reasons,
+        [
+            "cores 12.0 from p90 of 1 past run(s) (declared 8.0)",
+            "RAM 6000 MB from p90 of 1 past run(s) (declared 4096 MB)",
+        ]
+    );
+
+    let second = daemon.acquire_build(bob(), 0).await;
+    assert_eq!(second.lease.profile.cores, 12.0);
+    assert_eq!(second.lease.profile.ram_mb, 6_000);
+    assert_eq!(second.verdict.reasons.len(), 2, "{:?}", second.verdict);
+    daemon.stop().await;
 }
 
 #[tokio::test]

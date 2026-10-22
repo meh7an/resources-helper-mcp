@@ -119,6 +119,15 @@ impl MockDaemon {
         self.lock().leases.len()
     }
 
+    /// The working directory of every lease, in the order they were acquired.
+    pub(crate) fn lease_cwds(&self) -> Vec<String> {
+        self.lock()
+            .leases
+            .iter()
+            .map(|lease| lease.cwd.clone())
+            .collect()
+    }
+
     fn lock(&self) -> MutexGuard<'_, MockState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -166,6 +175,7 @@ pub(crate) fn lease(id: i64, holder: Holder, state: LeaseState) -> Lease {
             est_secs: 300,
         },
         label: "cargo build".into(),
+        cwd: String::new(),
         requested_at_ms: 0,
         granted_at_ms: None,
         ended_at_ms: None,
@@ -181,11 +191,18 @@ impl DaemonApi for MockDaemon {
 
     fn can_fit(&self, request: &CanFitRequest) -> impl Future<Output = Result<Verdict>> + Send {
         let fits = request.profile != ProfileSpec::Class(JobClass::GpuHeavy);
+        // Echoes the history inputs so tests can see what the tool sent.
+        let history = request.label.as_ref().map(|label| {
+            format!(
+                "history of {label} in {}",
+                request.cwd.as_deref().unwrap_or("?")
+            )
+        });
         let result = self.reply(|_| {
             Ok(Verdict {
                 fits,
                 reasons: if fits {
-                    vec![]
+                    history.into_iter().collect()
                 } else {
                     vec!["GPU: busy".into()]
                 },
@@ -215,6 +232,7 @@ impl DaemonApi for MockDaemon {
             );
             lease.kind = request.kind;
             lease.label = request.label;
+            lease.cwd = request.cwd.unwrap_or_default();
             state.leases.push(lease.clone());
             Ok(AcquireResponse {
                 lease,

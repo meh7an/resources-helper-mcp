@@ -69,6 +69,7 @@ fn build_request(wait_timeout_secs: u64) -> AcquireRequest {
         profile: ProfileSpec::Class(JobClass::CpuHeavy),
         kind: LeaseKind::Normal,
         label: "cargo build".into(),
+        cwd: Some(r"E:\work\app".into()),
         wait_timeout_secs,
     }
 }
@@ -173,6 +174,8 @@ async fn test_client_lease_lifecycle() {
     let request = CanFitRequest {
         profile: ProfileSpec::Class(JobClass::CpuHeavy),
         kind: LeaseKind::Normal,
+        label: Some("cargo build".into()),
+        cwd: Some(r"E:\work\app".into()),
     };
     assert!(client.can_fit(&request).await.unwrap().fits);
 
@@ -195,6 +198,19 @@ async fn test_client_lease_lifecycle() {
     assert_eq!(released.lease.state, LeaseState::Released);
     assert_eq!(released.noise, None);
     assert!(client.leases(&mine).await.unwrap().is_empty());
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_client_reads_empty_history_with_an_encoded_fingerprint() {
+    let daemon = Daemon::start().await;
+    let client = daemon.client();
+    assert!(client.history().await.unwrap().is_empty());
+    let runs = client
+        .history_runs(r"cargo build -p a&b|e:\work\app", Some(5))
+        .await
+        .unwrap();
+    assert!(runs.is_empty());
     daemon.stop().await;
 }
 

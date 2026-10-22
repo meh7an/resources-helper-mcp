@@ -47,7 +47,11 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { heartbeat_loop(&*client, &session, &held, every).await })
     };
 
-    let server = RhServer::new(client.clone(), holder.clone(), held.clone());
+    // Claude starts the server in the session's project directory.
+    let cwd = std::env::current_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default();
+    let server = RhServer::new(client.clone(), holder.clone(), held.clone(), cwd);
     let outcome = match server.serve(stdio()).await {
         Ok(service) => service
             .waiting()

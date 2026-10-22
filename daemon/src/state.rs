@@ -8,6 +8,7 @@ use std::{
 
 use diesel::sqlite::SqliteConnection;
 use rh_core::{
+    classifier::Classifier,
     ledger::{Ledger, LedgerSettings, ProcessLiveness, Transition},
     sampler::RawProcess,
 };
@@ -61,6 +62,8 @@ pub struct Shared {
     pub config: Config,
     /// The bearer token every authenticated request must carry.
     pub token: String,
+    /// The config's heavy-command rules, which fingerprint jobs for history.
+    pub classifier: Classifier,
     /// Database connections.
     pub pool: DbPool,
     /// The ledger. It stays locked while its transitions are written, so the database sees
@@ -80,9 +83,11 @@ impl Shared {
     /// Fresh state with an empty ledger and no sample yet.
     pub fn new(config: Config, token: String, pool: DbPool) -> Self {
         let ledger = Ledger::new(LedgerSettings::from_config(&config));
+        let classifier = Classifier::new(&config.classifier);
         Self {
             config,
             token,
+            classifier,
             pool,
             ledger: AsyncMutex::new(ledger),
             changes: watch::Sender::new(0),

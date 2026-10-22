@@ -33,6 +33,8 @@ pub struct RhServer<C: DaemonApi> {
     client: Arc<C>,
     holder: Holder,
     held: Arc<HeldLeases>,
+    /// The session's working directory, for requests that name none.
+    cwd: String,
     tool_router: ToolRouter<Self>,
 }
 
@@ -65,12 +67,14 @@ struct LeaseList {
 
 #[tool_router]
 impl<C: DaemonApi> RhServer<C> {
-    /// A server acting for `holder`, tracking acquired leases in `held`.
-    pub fn new(client: Arc<C>, holder: Holder, held: Arc<HeldLeases>) -> Self {
+    /// A server acting for `holder`, tracking acquired leases in `held`. Requests without a
+    /// working directory get `cwd`.
+    pub fn new(client: Arc<C>, holder: Holder, held: Arc<HeldLeases>, cwd: String) -> Self {
         Self {
             client,
             holder,
             held,
+            cwd,
             tool_router: Self::tool_router(),
         }
     }
@@ -87,16 +91,24 @@ impl<C: DaemonApi> RhServer<C> {
 
     #[tool(
         description = "Whether a job with this profile could start right now, with the \
-                       limiting resources and an estimated wait. Changes nothing.",
+                       limiting resources and an estimated wait. With label (the command), \
+                       the profile is raised to what earlier runs of it needed. Changes \
+                       nothing.",
         annotations(read_only_hint = true)
     )]
     async fn can_fit(
         &self,
         Parameters(params): Parameters<CanFitParams>,
     ) -> Result<String, String> {
+        let cwd = params
+            .label
+            .is_some()
+            .then(|| self.cwd_or_default(params.cwd));
         let request = CanFitRequest {
             profile: params.profile.to_spec()?,
             kind: params.kind.into(),
+            label: params.label,
+            cwd,
         };
         to_json(
             &self
@@ -112,7 +124,9 @@ impl<C: DaemonApi> RhServer<C> {
                           to wait_secs for the lease to start; if it is still queued it keeps \
                           its place, and calling again with its lease_id keeps waiting. Run \
                           the command only when state is active, then call release_lease. \
-                          A waiting benchmark reports its progress in verdict.benchmark."
+                          The reserved profile is raised to what earlier runs of the same \
+                          command needed. A waiting benchmark reports its progress in \
+                          verdict.benchmark."
     )]
     async fn acquire_lease(
         &self,
@@ -134,6 +148,7 @@ impl<C: DaemonApi> RhServer<C> {
                     profile: params.profile.to_spec()?,
                     kind: params.kind.into(),
                     label: params.label,
+                    cwd: Some(self.cwd_or_default(params.cwd)),
                     wait_timeout_secs,
                 };
                 self.client
@@ -219,6 +234,14 @@ impl<C: DaemonApi> RhServer<C> {
     }
 }
 
+impl<C: DaemonApi> RhServer<C> {
+    /// `cwd` as given, or the session's working directory when it is missing or blank.
+    fn cwd_or_default(&self, cwd: Option<String>) -> String {
+        cwd.filter(|cwd| !cwd.trim().is_empty())
+            .unwrap_or_else(|| self.cwd.clone())
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl<C: DaemonApi> ServerHandler for RhServer<C> {
     fn get_info(&self) -> ServerConfig {
@@ -244,7 +267,12 @@ mod tests {
 
     fn server_with(daemon: MockDaemon) -> (RhServer<MockDaemon>, Arc<MockDaemon>) {
         let daemon = Arc::new(daemon);
-        let server = RhServer::new(daemon.clone(), holder("me"), Arc::default());
+        let server = RhServer::new(
+            daemon.clone(),
+            holder("me"),
+            Arc::default(),
+            r"E:\session".into(),
+        );
         (server, daemon)
     }
 
@@ -285,10 +313,62 @@ mod tests {
                 ..ProfileParams::default()
             },
             kind: KindParam::Normal,
+            ..CanFitParams::default()
         };
         let verdict = json(server.can_fit(Parameters(params)).await);
         assert_eq!(verdict["fits"], false);
         assert_eq!(verdict["wait_estimate_secs"], 30);
+    }
+
+    #[tokio::test]
+    async fn test_can_fit_with_a_label_sends_it_with_the_session_directory() {
+        let (server, _) = server_with(MockDaemon::default());
+        let cpu = ProfileParams {
+            class: Some(ClassParam::CpuHeavy),
+            ..ProfileParams::default()
+        };
+        let labelled = CanFitParams {
+            profile: cpu.clone(),
+            label: Some("cargo build".into()),
+            ..CanFitParams::default()
+        };
+        let verdict = json(server.can_fit(Parameters(labelled.clone())).await);
+        assert_eq!(
+            verdict["reasons"][0],
+            r"history of cargo build in E:\session"
+        );
+
+        let elsewhere = CanFitParams {
+            cwd: Some(r"E:\other".into()),
+            ..labelled
+        };
+        let verdict = json(server.can_fit(Parameters(elsewhere)).await);
+        assert_eq!(verdict["reasons"][0], r"history of cargo build in E:\other");
+
+        let unlabelled = CanFitParams {
+            profile: cpu,
+            ..CanFitParams::default()
+        };
+        let verdict = json(server.can_fit(Parameters(unlabelled)).await);
+        assert_eq!(verdict["reasons"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_acquire_sends_the_session_directory_unless_given_one() {
+        let (server, daemon) = server_with(MockDaemon::default());
+        server
+            .acquire_lease(acquire(ClassParam::CpuHeavy))
+            .await
+            .unwrap();
+        let mut params = acquire(ClassParam::CpuHeavy);
+        params.0.cwd = Some(r"E:\other".into());
+        server.acquire_lease(params).await.unwrap();
+        let mut blank = acquire(ClassParam::CpuHeavy);
+        blank.0.cwd = Some("  ".into());
+        server.acquire_lease(blank).await.unwrap();
+
+        let cwds = daemon.lease_cwds();
+        assert_eq!(cwds, [r"E:\session", r"E:\other", r"E:\session"]);
     }
 
     #[tokio::test]

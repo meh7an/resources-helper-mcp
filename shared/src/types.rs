@@ -284,6 +284,9 @@ pub struct Lease {
     pub profile: JobProfile,
     /// What the lease is for, usually the command that will run.
     pub label: String,
+    /// Working directory of the command, or empty when the requester did not say.
+    #[serde(default)]
+    pub cwd: String,
     /// When the lease was requested, in milliseconds since the Unix epoch.
     pub requested_at_ms: i64,
     /// When the lease became active.
@@ -312,6 +315,34 @@ pub struct NoiseReport {
     /// Whether the machine met the quiet limits when the lease was granted. `false` means it
     /// was granted anyway after the longest quiet wait.
     pub quiet_at_start: bool,
+}
+
+/// One finished lease with what its holder's session used, kept for history-based estimates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobRun {
+    /// Lease the job ran under, if the lease is still stored.
+    pub lease_id: Option<LeaseId>,
+    /// Normalized command plus working directory, used to find similar runs.
+    pub fingerprint: String,
+    /// The lease's label, usually the command as it was run.
+    pub command: String,
+    /// Working directory of the command.
+    pub cwd: String,
+    /// Profile the lease reserved, which may already include an earlier estimate.
+    pub declared: JobProfile,
+    /// Peak usage of the holder's session during the run.
+    pub peak: ResourceUsage,
+    /// Average usage of the holder's session during the run.
+    pub avg: ResourceUsage,
+    /// Start of the run, in milliseconds since the Unix epoch.
+    pub started_at_ms: i64,
+    /// End of the run, in milliseconds since the Unix epoch.
+    pub ended_at_ms: i64,
+    /// Background load during the run; recorded only for benchmark leases.
+    pub noise: Option<NoiseReport>,
+    /// Whether the session held another active lease during the run. Usage is measured per
+    /// session, so such a run mixes several jobs and estimates leave it out.
+    pub overlapped: bool,
 }
 
 #[cfg(test)]
@@ -395,6 +426,37 @@ mod tests {
             avg_gpu_pct: 0.5,
             peak_gpu_pct: 3.25,
             quiet_at_start: false,
+        });
+    }
+
+    #[test]
+    fn test_lease_without_cwd_field_deserializes_with_empty_cwd() {
+        let mut value = serde_json::to_value(sample_lease()).unwrap();
+        value.as_object_mut().unwrap().remove("cwd");
+        let lease: Lease = serde_json::from_value(value).unwrap();
+        assert_eq!(lease.cwd, "");
+    }
+
+    #[test]
+    fn test_job_run_json_round_trip_preserves_every_field() {
+        let usage = ResourceUsage {
+            cores: 6.5,
+            ram_mb: 2800,
+            gpu_pct: 0.0,
+            vram_mb: 0,
+        };
+        assert_json_round_trip(&JobRun {
+            lease_id: Some(LeaseId(3)),
+            fingerprint: r"cargo build -p rhd|e:\work\app".into(),
+            command: "cargo build -p rhd 2>&1".into(),
+            cwd: r"E:\work\app".into(),
+            declared: profile_with(8.0, 0.0),
+            peak: usage,
+            avg: usage,
+            started_at_ms: 1_793_000_000_000,
+            ended_at_ms: 1_793_000_095_000,
+            noise: None,
+            overlapped: true,
         });
     }
 

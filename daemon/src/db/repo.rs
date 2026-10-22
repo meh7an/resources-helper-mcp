@@ -7,10 +7,7 @@
 use diesel::prelude::*;
 use rh_shared::{
     api::LeaseQuery,
-    types::{
-        Holder, JobClass, JobProfile, Lease, LeaseId, LeaseKind, LeaseState, NoiseReport,
-        ResourceUsage,
-    },
+    types::{Holder, JobClass, JobProfile, JobRun, Lease, LeaseId, LeaseKind, LeaseState},
 };
 
 use super::{
@@ -31,6 +28,8 @@ pub struct LeaseDraft {
     pub profile: JobProfile,
     /// What the lease is for, usually the command that will run.
     pub label: String,
+    /// Working directory of the command, or empty when unknown.
+    pub cwd: String,
     /// When the lease was requested, in milliseconds since the Unix epoch.
     pub requested_at_ms: i64,
     /// First heartbeat deadline.
@@ -50,31 +49,6 @@ pub struct LeaseEvent {
     pub to_state: LeaseState,
     /// Why the transition happened, for example `granted` or `holder process exited`.
     pub reason: String,
-}
-
-/// One finished job, as recorded for history-based estimates.
-#[derive(Debug, Clone, PartialEq)]
-pub struct JobRun {
-    /// Lease the job ran under, if the lease is still stored.
-    pub lease_id: Option<LeaseId>,
-    /// Normalized command plus working directory, used to find similar runs.
-    pub fingerprint: String,
-    /// The command as it was run.
-    pub command: String,
-    /// Working directory of the command.
-    pub cwd: String,
-    /// Profile the lease declared.
-    pub declared: JobProfile,
-    /// Peak usage of the holder's session during the run.
-    pub peak: ResourceUsage,
-    /// Average usage of the holder's session during the run.
-    pub avg: ResourceUsage,
-    /// Start of the run, in milliseconds since the Unix epoch.
-    pub started_at_ms: i64,
-    /// End of the run, in milliseconds since the Unix epoch.
-    pub ended_at_ms: i64,
-    /// Background load during the run; recorded only for benchmark leases.
-    pub noise: Option<NoiseReport>,
 }
 
 /// Stores a new `Queued` lease and its creation event.
@@ -247,6 +221,22 @@ pub fn recent_job_runs(
         .collect()
 }
 
+/// Returns up to `limit` runs of any fingerprint, newest first.
+///
+/// # Errors
+///
+/// Returns an error when the query fails or a row holds values the shared types reject.
+pub fn latest_job_runs(conn: &mut SqliteConnection, limit: u32) -> anyhow::Result<Vec<JobRun>> {
+    job_runs::table
+        .order((job_runs::ended_at_ms.desc(), job_runs::id.desc()))
+        .limit(i64::from(limit))
+        .select(JobRunRow::as_select())
+        .load(conn)?
+        .into_iter()
+        .map(JobRun::try_from)
+        .collect()
+}
+
 fn append_event(
     conn: &mut SqliteConnection,
     lease_id: LeaseId,
@@ -266,7 +256,7 @@ fn append_event(
 #[cfg(test)]
 mod tests {
     use diesel::sql_query;
-    use rh_shared::types::SessionKey;
+    use rh_shared::types::{NoiseReport, ResourceUsage, SessionKey};
 
     use super::*;
     use crate::db::test_support::{memory_conn, sample_draft};
@@ -289,6 +279,7 @@ mod tests {
             started_at_ms,
             ended_at_ms: started_at_ms + 95_000,
             noise,
+            overlapped: false,
         }
     }
 
@@ -302,6 +293,7 @@ mod tests {
         assert_eq!(lease.holder, draft.holder);
         assert_eq!(lease.class, draft.class);
         assert_eq!(lease.profile, draft.profile);
+        assert_eq!(lease.cwd, draft.cwd);
         assert_eq!(lease.granted_at_ms, None);
         assert_eq!(get_lease(&mut conn, lease.id).unwrap(), Some(lease.clone()));
         assert_eq!(
@@ -464,6 +456,31 @@ mod tests {
             recent_job_runs(&mut conn, "unknown", 10)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_latest_job_runs_spans_fingerprints_newest_first() {
+        let mut conn = memory_conn();
+        let overlapped = JobRun {
+            overlapped: true,
+            ..sample_run("pnpm test|web", 5_000, None)
+        };
+        for run in [
+            &sample_run("a", 1_000, None),
+            &overlapped,
+            &sample_run("b", 3_000, None),
+        ] {
+            insert_job_run(&mut conn, run).unwrap();
+        }
+        let fingerprints: Vec<(String, bool)> = latest_job_runs(&mut conn, 2)
+            .unwrap()
+            .into_iter()
+            .map(|run| (run.fingerprint, run.overlapped))
+            .collect();
+        assert_eq!(
+            fingerprints,
+            [("pnpm test|web".to_owned(), true), ("b".to_owned(), false)]
         );
     }
 

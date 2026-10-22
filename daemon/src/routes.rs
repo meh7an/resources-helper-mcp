@@ -12,28 +12,41 @@ use axum::{
     routing::{delete, get, post},
 };
 use rh_core::{
-    benchmark::BenchmarkRun,
+    history::{self, ESTIMATE_RUNS, Estimate},
     ledger::{LedgerError, Transition},
+    meter::MeteredRun,
 };
 use rh_shared::{
     api::{
         AcquireRequest, AcquireResponse, CanFitRequest, HealthResponse, HeartbeatResponse,
-        LeaseOwner, LeaseQuery, LeasesResponse, ProfileSpec, RegisterSessionRequest,
-        ReleaseResponse, SessionsResponse, Verdict, WaitRequest,
+        HistoryResponse, HistoryRunsQuery, HistoryRunsResponse, LeaseOwner, LeaseQuery,
+        LeasesResponse, ProfileSpec, RegisterSessionRequest, ReleaseResponse, SessionsResponse,
+        Verdict, WaitRequest,
     },
     config::Config,
-    types::{JobClass, JobProfile, Lease, LeaseId, LeaseState, SessionKey, Snapshot},
+    types::{
+        JobClass, JobProfile, JobRun, Lease, LeaseId, LeaseKind, LeaseState, SessionKey, Snapshot,
+    },
 };
 use tokio::sync::watch;
 
 use crate::{
-    db::repo::{self, JobRun, LeaseDraft},
+    db::repo::{self, LeaseDraft},
     error::AppError,
     state::{AppState, now_ms},
 };
 
 // Longer waits risk client and proxy timeouts; the caller can heartbeat and ask again.
 const MAX_ACQUIRE_WAIT: Duration = Duration::from_secs(120);
+
+// Overlapped runs are skipped, so an estimate reads more rows than it uses.
+const ESTIMATE_SCAN: u32 = ESTIMATE_RUNS as u32 * 5;
+
+// Rows the history summary groups; M6.1's pruning keeps the table well below this.
+const SUMMARY_SCAN: u32 = 5_000;
+
+const DEFAULT_HISTORY_RUNS: u32 = 20;
+const MAX_HISTORY_RUNS: u32 = 500;
 
 /// Every route, with the token check on all but `/health`.
 pub fn router(state: AppState) -> Router {
@@ -45,6 +58,8 @@ pub fn router(state: AppState) -> Router {
         .route("/leases/{id}/heartbeat", post(heartbeat))
         .route("/leases/{id}/wait", post(wait))
         .route("/sessions", get(sessions).post(register_session))
+        .route("/history", get(job_history))
+        .route("/history/runs", get(history_runs))
         .route("/shutdown", post(shutdown))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token))
         .route("/health", get(health))
@@ -107,15 +122,71 @@ async fn can_fit(
     State(state): State<AppState>,
     Json(request): Json<CanFitRequest>,
 ) -> Result<Json<Verdict>, AppError> {
-    let (profile, _) = resolve_profile(&state.config, &request.profile)?;
+    let (declared, _) = resolve_profile(&state.config, &request.profile)?;
     let latest = state.latest().ok_or(AppError::Unavailable)?;
+    let estimate = match &request.label {
+        Some(label) => {
+            let cwd = request.cwd.as_deref().unwrap_or_default();
+            estimate(&state, declared, label, cwd).await?
+        }
+        None => Estimate {
+            profile: declared,
+            reasons: Vec::new(),
+        },
+    };
     let ledger = state.ledger.lock().await;
-    Ok(Json(ledger.can_fit(
-        &profile,
-        request.kind,
-        &latest.snapshot,
-        now_ms(),
-    )))
+    let mut verdict = ledger.can_fit(&estimate.profile, request.kind, &latest.snapshot, now_ms());
+    verdict.reasons.splice(0..0, estimate.reasons);
+    Ok(Json(verdict))
+}
+
+/// `declared` raised by what similar past runs of `label` in `cwd` used. Before the first
+/// sample there is no ceiling to cap at, so history is left out.
+async fn estimate(
+    state: &AppState,
+    declared: JobProfile,
+    label: &str,
+    cwd: &str,
+) -> Result<Estimate, AppError> {
+    let unchanged = Estimate {
+        profile: declared,
+        reasons: Vec::new(),
+    };
+    let Some(latest) = state.latest() else {
+        return Ok(unchanged);
+    };
+    let fingerprint = history::fingerprint(&state.classifier, label, cwd);
+    let runs = state
+        .with_db(move |conn| repo::recent_job_runs(conn, &fingerprint, ESTIMATE_SCAN))
+        .await?;
+    let Some(learned) = history::learned(&runs) else {
+        return Ok(unchanged);
+    };
+    let ceiling = state.ledger.lock().await.ceiling(&latest.snapshot);
+    Ok(history::estimate(&declared, Some(&learned), &ceiling))
+}
+
+async fn job_history(State(state): State<AppState>) -> Result<Json<HistoryResponse>, AppError> {
+    let runs = state
+        .with_db(|conn| repo::latest_job_runs(conn, SUMMARY_SCAN))
+        .await?;
+    Ok(Json(HistoryResponse {
+        jobs: history::summarize(&runs),
+    }))
+}
+
+async fn history_runs(
+    State(state): State<AppState>,
+    Query(query): Query<HistoryRunsQuery>,
+) -> Result<Json<HistoryRunsResponse>, AppError> {
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_HISTORY_RUNS)
+        .min(MAX_HISTORY_RUNS);
+    let runs = state
+        .with_db(move |conn| repo::recent_job_runs(conn, &query.fingerprint, limit))
+        .await?;
+    Ok(Json(HistoryRunsResponse { runs }))
 }
 
 async fn list_leases(
@@ -132,7 +203,9 @@ async fn acquire(
     State(state): State<AppState>,
     Json(request): Json<AcquireRequest>,
 ) -> Result<Json<AcquireResponse>, AppError> {
-    let (profile, class) = resolve_profile(&state.config, &request.profile)?;
+    let (declared, class) = resolve_profile(&state.config, &request.profile)?;
+    let cwd = request.cwd.unwrap_or_default();
+    let estimate = estimate(&state, declared, &request.label, &cwd).await?;
     state.register(request.holder.clone());
     let session = request.holder.session.clone();
     let now = now_ms();
@@ -142,8 +215,9 @@ async fn acquire(
         holder: request.holder,
         kind: request.kind,
         class,
-        profile,
+        profile: estimate.profile,
         label: request.label,
+        cwd,
         requested_at_ms: now,
         expires_at_ms: now.saturating_add(ttl_ms),
     };
@@ -158,7 +232,10 @@ async fn acquire(
         ledger.enqueue(lease)?;
         state.tick(&mut ledger).await?;
     }
-    wait_for_grant(&state, id, &session, request.wait_timeout_secs, changes).await
+    let Json(mut response) =
+        wait_for_grant(&state, id, &session, request.wait_timeout_secs, changes).await?;
+    response.verdict.reasons.splice(0..0, estimate.reasons);
+    Ok(Json(response))
 }
 
 /// Keeps waiting for a queued lease, which keeps its place. Answers at once for a lease
@@ -268,7 +345,7 @@ async fn release(
     let id = LeaseId(id);
     let now = now_ms();
     let mut ledger = state.ledger.lock().await;
-    let benchmark = match ledger.release(id, &owner.session, now) {
+    let finished = match ledger.release(id, &owner.session, now) {
         Ok(released) => {
             let transition = Transition {
                 id,
@@ -280,43 +357,44 @@ async fn release(
             // The freed room may let queued leases start right away.
             state.tick(&mut ledger).await?;
             released
-                .benchmark
-                .map(|run| (job_run(&released.lease, &run, now), run))
+                .run
+                .map(|run| job_run(&state, &released.lease, &run, now))
         }
         Err(LedgerError::NotFound(_)) => None,
         Err(error) => return Err(error.into()),
     };
     drop(ledger);
 
-    let noise = benchmark.as_ref().map(|(_, run)| run.noise);
-    if let Some((job, _)) = benchmark {
+    let noise = finished.as_ref().and_then(|job| job.noise);
+    if let Some(job) = finished {
         // The release itself succeeded; losing the history row must not hide the noise
         // report from the holder.
         if let Err(error) = state
             .with_db(move |conn| repo::insert_job_run(conn, &job))
             .await
         {
-            tracing::error!(lease = id.0, "storing the benchmark run failed: {error:#}");
+            tracing::error!(lease = id.0, "storing the job run failed: {error:#}");
         }
     }
     let lease = stored_lease(&state, id, &owner.session).await?;
     Ok(Json(ReleaseResponse { lease, noise }))
 }
 
-/// The history row of a finished benchmark lease. Its label stands in for the command and
-/// the fingerprint until learned job profiles record them properly.
-fn job_run(lease: &Lease, run: &BenchmarkRun, ended_at_ms: i64) -> JobRun {
+/// The history row of a lease its holder released. Noise is kept for benchmarks only; other
+/// leases share the machine on purpose.
+fn job_run(state: &AppState, lease: &Lease, run: &MeteredRun, ended_at_ms: i64) -> JobRun {
     JobRun {
         lease_id: Some(lease.id),
-        fingerprint: lease.label.trim().to_owned(),
+        fingerprint: history::fingerprint(&state.classifier, &lease.label, &lease.cwd),
         command: lease.label.clone(),
-        cwd: String::new(),
+        cwd: lease.cwd.clone(),
         declared: lease.profile,
         peak: run.holder_peak,
         avg: run.holder_avg,
         started_at_ms: lease.granted_at_ms.unwrap_or(lease.requested_at_ms),
         ended_at_ms,
-        noise: Some(run.noise),
+        noise: (lease.kind == LeaseKind::BenchmarkExclusive).then_some(run.noise),
+        overlapped: run.overlapped,
     }
 }
 

@@ -97,6 +97,7 @@ pub(crate) fn queued_lease(
         class: None,
         profile,
         label: format!("job {id}"),
+        cwd: String::new(),
         requested_at_ms,
         granted_at_ms: None,
         ended_at_ms: None,

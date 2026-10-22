@@ -112,6 +112,7 @@ pub(crate) fn sample_lease() -> Lease {
             est_secs: 300,
         },
         label: "cargo bench".into(),
+        cwd: r"E:\work\app".into(),
         requested_at_ms: 1_793_000_000_500,
         granted_at_ms: Some(1_793_000_012_000),
         ended_at_ms: None,

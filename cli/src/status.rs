@@ -198,12 +198,12 @@ fn short(session: &SessionKey) -> String {
     format!("{id:<SESSION_ID_SHOWN$}")
 }
 
-fn gb(mb: u64) -> String {
+pub(crate) fn gb(mb: u64) -> String {
     format!("{:.1} GB", mb as f64 / 1024.0)
 }
 
 /// `42s`, `12m 05s`, or `2h 03m`.
-fn duration(ms: i64) -> String {
+pub(crate) fn duration(ms: i64) -> String {
     let secs = ms.max(0) / 1_000;
     match secs {
         0..60 => format!("{secs}s"),
@@ -212,7 +212,7 @@ fn duration(ms: i64) -> String {
     }
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
@@ -250,6 +250,7 @@ mod tests {
                 est_secs: 300,
             },
             label: "cargo build".into(),
+            cwd: String::new(),
             requested_at_ms: 1_000,
             granted_at_ms: Some(2_000),
             ended_at_ms: None,

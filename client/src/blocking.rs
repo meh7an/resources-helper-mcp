@@ -3,9 +3,9 @@
 use rh_shared::{
     api::{
         AcquireRequest, AcquireResponse, CanFitRequest, HealthResponse, HeartbeatResponse,
-        LeaseQuery, ReleaseResponse, Verdict,
+        JobSummary, LeaseQuery, ReleaseResponse, Verdict,
     },
-    types::{Holder, Lease, LeaseId, SessionKey, SessionUsage, Snapshot},
+    types::{Holder, JobRun, Lease, LeaseId, SessionKey, SessionUsage, Snapshot},
 };
 use tokio::runtime::{Builder, Runtime};
 
@@ -120,6 +120,25 @@ impl BlockingClient {
     /// As [`Client::leases`].
     pub fn leases(&self, query: &LeaseQuery) -> Result<Vec<Lease>> {
         self.runtime.block_on(self.client.leases(query))
+    }
+
+    /// See [`Client::history`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::history`].
+    pub fn history(&self) -> Result<Vec<JobSummary>> {
+        self.runtime.block_on(self.client.history())
+    }
+
+    /// See [`Client::history_runs`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::history_runs`].
+    pub fn history_runs(&self, fingerprint: &str, limit: Option<u32>) -> Result<Vec<JobRun>> {
+        self.runtime
+            .block_on(self.client.history_runs(fingerprint, limit))
     }
 
     /// See [`Client::sessions`].

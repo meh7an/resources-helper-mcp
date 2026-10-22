@@ -270,6 +270,7 @@ mod tests {
             class: None,
             profile,
             label: format!("job {id}"),
+            cwd: String::new(),
             requested_at_ms: 0,
             granted_at_ms: None,
             ended_at_ms: None,
