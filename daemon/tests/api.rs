@@ -658,8 +658,9 @@ async fn test_released_run_raises_the_next_estimate_and_shows_in_history() {
     assert!(first.verdict.reasons.is_empty(), "{:?}", first.verdict);
     // About ten samples while the build runs.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    set_alice_usage(0.0, 0);
     let released = daemon.release_response(first.lease.id, "alice").await;
+    // Only after the release, or a sample of the run may see the reset.
+    set_alice_usage(0.0, 0);
     assert_eq!(released.noise, None);
 
     let history: HistoryResponse = daemon.get("/history").await.json().await.unwrap();

@@ -3,6 +3,7 @@
 //! Also reads the current process's ancestry, which the CLI and MCP server use to find
 //! their Claude session.
 
+mod cpu;
 mod dxgi;
 mod gpu;
 mod pdh;
@@ -12,7 +13,7 @@ pub use crate::process::current_ancestry;
 
 use std::{
     collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rh_core::sampler::{RawGpu, RawProcess, RawSample, Sampler};
@@ -21,6 +22,8 @@ use rh_shared::{
     types::{MemStats, ResourceUsage},
 };
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+use crate::cpu::{CpuTimes, ProcessTime};
 
 const BYTES_PER_MB: u64 = 1024 * 1024;
 
@@ -35,6 +38,9 @@ pub struct SystemSampler {
     commit_limit: pdh::Counter,
     gpu: Option<GpuCounters>,
     adapters: Vec<dxgi::AdapterInfo>,
+    cpu_times: CpuTimes,
+    /// Logical cores per PID since the previous refresh.
+    process_cores: HashMap<u32, f32>,
 }
 
 #[derive(Debug)]
@@ -87,6 +93,8 @@ impl SystemSampler {
             commit_limit,
             gpu,
             adapters,
+            cpu_times: CpuTimes::default(),
+            process_cores: HashMap::new(),
         };
         sampler.refresh()?;
         Ok(sampler)
@@ -95,11 +103,24 @@ impl SystemSampler {
     fn refresh(&mut self) -> Result<()> {
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
+        // The CPU refresh kind keeps each process's cumulative CPU time current.
         self.system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
             ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
+        let times: Vec<ProcessTime> = self
+            .system
+            .processes()
+            .values()
+            .map(|process| ProcessTime {
+                pid: process.pid().as_u32(),
+                start_time: process.start_time(),
+                cpu_ms: process.accumulated_cpu_time(),
+            })
+            .collect();
+        let logical_cores = self.system.cpus().len().max(1) as f32;
+        self.process_cores = self.cpu_times.update(Instant::now(), &times, logical_cores);
         self.query.collect()
     }
 
@@ -189,7 +210,7 @@ impl Sampler for SystemSampler {
                     name: process.name().to_string_lossy().into_owned(),
                     start_time: process.start_time(),
                     usage: ResourceUsage {
-                        cores: process.cpu_usage() / 100.0,
+                        cores: self.process_cores.get(&pid).copied().unwrap_or_default(),
                         ram_mb: process.memory() / BYTES_PER_MB,
                         gpu_pct: gpu.process_load.get(&pid).copied().unwrap_or_default(),
                         vram_mb: gpu.process_vram_mb.get(&pid).copied().unwrap_or_default(),
@@ -229,7 +250,7 @@ fn to_mb(bytes: f64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{process, thread};
+    use std::{process, thread, time::Duration};
 
     use super::*;
 
@@ -246,5 +267,27 @@ mod tests {
         assert!(raw.memory.total_mb > 0 && raw.memory.available_mb <= raw.memory.total_mb);
         assert!(raw.memory.commit_used_mb > 0);
         assert!(raw.memory.commit_used_mb <= raw.memory.commit_limit_mb);
+    }
+
+    #[test]
+    fn test_system_sampler_counts_a_process_started_since_the_previous_sample() {
+        let mut sampler = SystemSampler::new().unwrap();
+        let mut burner = process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "$t = [Environment]::TickCount; \
+                 while ([Environment]::TickCount - $t -lt 3000) {}",
+            ])
+            .spawn()
+            .unwrap();
+        thread::sleep(Duration::from_millis(1_500));
+        let raw = sampler.sample().unwrap();
+        burner.kill().ok();
+        burner.wait().ok();
+
+        let child = raw.processes.iter().find(|p| p.pid == burner.id());
+        let cores = child.expect("the child is sampled").usage.cores;
+        assert!(cores > 0.3, "a busy new process read {cores} cores");
     }
 }
