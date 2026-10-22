@@ -317,6 +317,16 @@ pub struct NoiseReport {
     pub quiet_at_start: bool,
 }
 
+/// Average load of a lease holder's session over only the samples in which it was busy, so
+/// the idle time before and after the command does not water the load down.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BusyUsage {
+    /// Average CPU load in logical cores.
+    pub cores: f32,
+    /// Average GPU engine load as a percentage of one adapter.
+    pub gpu_pct: f32,
+}
+
 /// One finished lease with what its holder's session used, kept for history-based estimates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobRun {
@@ -334,6 +344,10 @@ pub struct JobRun {
     pub peak: ResourceUsage,
     /// Average usage of the holder's session during the run.
     pub avg: ResourceUsage,
+    /// Average load while the session was busy; `None` when it never was, and for runs
+    /// recorded before this was measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy: Option<BusyUsage>,
     /// Start of the run, in milliseconds since the Unix epoch.
     pub started_at_ms: i64,
     /// End of the run, in milliseconds since the Unix epoch.
@@ -453,6 +467,10 @@ mod tests {
             declared: profile_with(8.0, 0.0),
             peak: usage,
             avg: usage,
+            busy: Some(BusyUsage {
+                cores: 7.25,
+                gpu_pct: 0.0,
+            }),
             started_at_ms: 1_793_000_000_000,
             ended_at_ms: 1_793_000_095_000,
             noise: None,

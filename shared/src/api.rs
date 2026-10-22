@@ -214,7 +214,7 @@ pub struct JobSummary {
     pub estimate_runs: u32,
     /// End of the most recent run, in milliseconds since the Unix epoch.
     pub last_ended_at_ms: i64,
-    /// What the runs needed: p90 of peak memory, of average CPU and GPU load, and of run
+    /// What the runs needed: p90 of peak memory, of CPU and GPU load while busy, and of run
     /// time. `None` when every run overlapped another lease.
     pub learned: Option<JobProfile>,
 }

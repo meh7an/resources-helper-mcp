@@ -364,7 +364,7 @@ fn append_event(
 #[cfg(test)]
 mod tests {
     use diesel::sql_query;
-    use rh_shared::types::{NoiseReport, ResourceUsage, SessionKey};
+    use rh_shared::types::{BusyUsage, NoiseReport, ResourceUsage, SessionKey};
 
     use super::*;
     use crate::db::test_support::{memory_conn, sample_draft};
@@ -384,6 +384,10 @@ mod tests {
             declared: sample_draft("s1", 0).profile,
             peak: usage(7.5, 3900),
             avg: usage(5.25, 2800),
+            busy: Some(BusyUsage {
+                cores: 6.5,
+                gpu_pct: 0.0,
+            }),
             started_at_ms,
             ended_at_ms: started_at_ms + 95_000,
             noise,
@@ -725,6 +729,23 @@ mod tests {
         };
         insert_job_run(&mut conn, &run).unwrap();
         assert_eq!(recent_job_runs(&mut conn, "f", 1).unwrap(), [run]);
+    }
+
+    #[test]
+    fn test_job_run_without_busy_load_reads_back_as_none() {
+        let mut conn = memory_conn();
+        let older = JobRun {
+            busy: None,
+            ..sample_run("f", 1_000, None)
+        };
+        insert_job_run(&mut conn, &older).unwrap();
+        assert_eq!(recent_job_runs(&mut conn, "f", 1).unwrap(), [older]);
+
+        sql_query("UPDATE job_runs SET busy_cores = 1.5")
+            .execute(&mut conn)
+            .unwrap();
+        let error = recent_job_runs(&mut conn, "f", 1).unwrap_err();
+        assert!(format!("{error:#}").contains("busy columns"), "{error:#}");
     }
 
     #[test]

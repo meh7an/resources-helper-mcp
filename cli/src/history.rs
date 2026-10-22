@@ -3,7 +3,7 @@
 use rh_client::BlockingClient;
 use rh_shared::{
     api::JobSummary,
-    types::{JobProfile, JobRun},
+    types::{BusyUsage, JobProfile, JobRun},
 };
 
 use crate::status::{duration, gb, now_ms};
@@ -31,8 +31,8 @@ fn format_jobs(jobs: &[JobSummary], now_ms: i64) -> String {
         return "no job history yet\n".to_owned();
     }
     let mut text = String::from(
-        "learned needs: p90 of peak memory and of average load over the newest runs without \
-         an overlapping lease\n",
+        "learned needs: p90 of peak memory and of the load while busy over the newest runs \
+         without an overlapping lease\n",
     );
     for job in jobs {
         text.push_str(&format!(
@@ -76,18 +76,27 @@ fn format_runs(fingerprint: &str, runs: &[JobRun], now_ms: i64) -> String {
         let lease = run
             .lease_id
             .map_or_else(|| "-".to_owned(), |id| id.0.to_string());
+        let busy = |value: fn(&BusyUsage) -> f32, digits: usize| {
+            run.busy.as_ref().map_or_else(
+                || "-".to_owned(),
+                |busy| format!("{:.digits$}", value(busy)),
+            )
+        };
         text.push_str(&format!(
-            "  lease {lease:<5} {:>8} ago  took {:<8} cores avg {:.1} peak {:.1}, ram peak {}",
+            "  lease {lease:<5} {:>8} ago  took {:<8} cores avg {:.1} busy {} peak {:.1}, \
+             ram peak {}",
             duration(now_ms - run.ended_at_ms),
             duration(run.ended_at_ms - run.started_at_ms),
             run.avg.cores,
+            busy(|busy| busy.cores, 1),
             run.peak.cores,
             gb(run.peak.ram_mb)
         ));
         if run.peak.gpu_pct > 0.0 || run.peak.vram_mb > 0 {
             text.push_str(&format!(
-                ", gpu avg {:.0}%, vram peak {}",
+                ", gpu avg {:.0}% busy {}%, vram peak {}",
                 run.avg.gpu_pct,
+                busy(|busy| busy.gpu_pct, 0),
                 gb(run.peak.vram_mb)
             ));
         }
@@ -134,6 +143,10 @@ mod tests {
             declared: profile(),
             peak: usage(14.0, 2_458),
             avg: usage(6.2, 1_800),
+            busy: Some(BusyUsage {
+                cores: 9.3,
+                gpu_pct: 0.0,
+            }),
             started_at_ms: 0,
             ended_at_ms: 95_000,
             noise: None,
@@ -173,15 +186,27 @@ mod tests {
 
     #[test]
     fn test_format_runs_marks_overlapped_runs() {
-        let text = format_runs("cargo build|e:\\app", &[run(false), run(true)], 155_000);
+        let older = JobRun {
+            busy: None,
+            ..run(false)
+        };
+        let text = format_runs(
+            "cargo build|e:\\app",
+            &[run(false), run(true), older],
+            155_000,
+        );
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "cargo build|e:\\app");
         assert_eq!(
             lines[1],
-            "  lease 41      1m 00s ago  took 1m 35s   cores avg 6.2 peak 14.0, ram peak 2.4 GB  \
-             cargo build 2>&1"
+            "  lease 41      1m 00s ago  took 1m 35s   cores avg 6.2 busy 9.3 peak 14.0, \
+             ram peak 2.4 GB  cargo build 2>&1"
         );
         assert!(lines[2].contains("(overlapped)  cargo build"), "{text}");
+        assert!(
+            lines[3].contains("cores avg 6.2 busy - peak 14.0"),
+            "{text}"
+        );
         assert_eq!(format_runs("x|", &[], 0), "no runs of x|\n");
     }
 }

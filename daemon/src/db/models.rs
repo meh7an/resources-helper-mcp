@@ -6,8 +6,8 @@
 use anyhow::{Context, anyhow, bail};
 use diesel::prelude::*;
 use rh_shared::types::{
-    Holder, JobClass, JobProfile, JobRun, Lease, LeaseId, LeaseKind, LeaseState, NoiseReport,
-    ResourceUsage, SessionKey,
+    BusyUsage, Holder, JobClass, JobProfile, JobRun, Lease, LeaseId, LeaseKind, LeaseState,
+    NoiseReport, ResourceUsage, SessionKey,
 };
 
 use super::{
@@ -210,6 +210,8 @@ pub(super) struct JobRunRow {
     noise_peak_gpu_pct: Option<f32>,
     noise_quiet_at_start: Option<bool>,
     overlapped: bool,
+    busy_cores: Option<f32>,
+    busy_gpu_pct: Option<f32>,
 }
 
 impl TryFrom<JobRunRow> for JobRun {
@@ -239,6 +241,11 @@ impl TryFrom<JobRunRow> for JobRun {
             (None, None, None, None, None) => None,
             _ => bail!("job_runs noise columns are only partly set"),
         };
+        let busy = match (row.busy_cores, row.busy_gpu_pct) {
+            (Some(cores), Some(gpu_pct)) => Some(BusyUsage { cores, gpu_pct }),
+            (None, None) => None,
+            _ => bail!("job_runs busy columns are only partly set"),
+        };
         Ok(Self {
             lease_id: row.lease_id.map(LeaseId),
             fingerprint: row.fingerprint,
@@ -263,6 +270,7 @@ impl TryFrom<JobRunRow> for JobRun {
                 gpu_pct: row.avg_gpu_pct,
                 vram_mb: from_column(row.avg_vram_mb, "job_runs.avg_vram_mb")?,
             },
+            busy,
             started_at_ms: row.started_at_ms,
             ended_at_ms: row.ended_at_ms,
             noise,
@@ -299,6 +307,8 @@ pub(super) struct NewJobRunRow<'a> {
     noise_peak_gpu_pct: Option<f32>,
     noise_quiet_at_start: Option<bool>,
     overlapped: bool,
+    busy_cores: Option<f32>,
+    busy_gpu_pct: Option<f32>,
 }
 
 impl<'a> NewJobRunRow<'a> {
@@ -329,6 +339,8 @@ impl<'a> NewJobRunRow<'a> {
             noise_peak_gpu_pct: run.noise.map(|noise| noise.peak_gpu_pct),
             noise_quiet_at_start: run.noise.map(|noise| noise.quiet_at_start),
             overlapped: run.overlapped,
+            busy_cores: run.busy.map(|busy| busy.cores),
+            busy_gpu_pct: run.busy.map(|busy| busy.gpu_pct),
         })
     }
 }

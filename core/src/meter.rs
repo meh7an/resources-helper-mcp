@@ -1,7 +1,14 @@
 //! What an active lease's session used while it ran, and how much load from outside that
 //! session disturbed it.
 
-use rh_shared::types::{LeaseId, NoiseReport, ResourceUsage, SessionKey, Snapshot};
+use rh_shared::types::{BusyUsage, LeaseId, NoiseReport, ResourceUsage, SessionKey, Snapshot};
+
+/// Cores at or above which a sample counts as busy. An idle Claude session reads about 0.03
+/// cores, so this leaves out its own polling but keeps a single busy thread.
+pub const BUSY_MIN_CORES: f32 = 0.25;
+
+/// GPU engine load at or above which a sample counts as busy.
+pub const BUSY_MIN_GPU_PCT: f32 = 5.0;
 
 /// What a finished lease measured.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -12,6 +19,9 @@ pub struct MeteredRun {
     pub holder_peak: ResourceUsage,
     /// Average usage of the holder's session.
     pub holder_avg: ResourceUsage,
+    /// Average load of the holder's session over its busy samples; `None` when it was never
+    /// busy.
+    pub holder_busy: Option<BusyUsage>,
     /// Whether the session held another active lease at some point during the run, so its
     /// usage mixes several jobs.
     pub overlapped: bool,
@@ -30,6 +40,8 @@ pub struct RunMeter {
     noise_gpu: Stat,
     holder_sum: [f64; 4],
     holder_peak: ResourceUsage,
+    busy_samples: u32,
+    busy_sum: [f64; 2],
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -70,6 +82,8 @@ impl RunMeter {
             noise_gpu: Stat::default(),
             holder_sum: [0.0; 4],
             holder_peak: ResourceUsage::default(),
+            busy_samples: 0,
+            busy_sum: [0.0; 2],
         }
     }
 
@@ -123,6 +137,12 @@ impl RunMeter {
         peak.ram_mb = peak.ram_mb.max(holder.ram_mb);
         peak.gpu_pct = peak.gpu_pct.max(holder.gpu_pct);
         peak.vram_mb = peak.vram_mb.max(holder.vram_mb);
+
+        if holder.cores >= BUSY_MIN_CORES || holder.gpu_pct >= BUSY_MIN_GPU_PCT {
+            self.busy_samples += 1;
+            self.busy_sum[0] += f64::from(holder.cores);
+            self.busy_sum[1] += f64::from(holder.gpu_pct);
+        }
     }
 
     /// The measurements, or `None` when no sample arrived during the lease.
@@ -133,6 +153,13 @@ impl RunMeter {
         }
         let mean = |sum: f64| sum / f64::from(count);
         let [cores, ram_mb, gpu_pct, vram_mb] = self.holder_sum.map(mean);
+        let holder_busy = (self.busy_samples > 0).then(|| {
+            let [cores, gpu_pct] = self.busy_sum.map(|sum| sum / f64::from(self.busy_samples));
+            BusyUsage {
+                cores: cores as f32,
+                gpu_pct: gpu_pct as f32,
+            }
+        });
         Some(MeteredRun {
             noise: NoiseReport {
                 avg_cpu_pct: self.noise_cpu.mean(count),
@@ -148,6 +175,7 @@ impl RunMeter {
                 gpu_pct: gpu_pct as f32,
                 vram_mb: vram_mb.round() as u64,
             },
+            holder_busy,
             overlapped: self.overlapped,
         })
     }
@@ -205,5 +233,51 @@ mod tests {
         assert_eq!(run.holder_peak.cores, 14.0);
         assert!((run.holder_avg.cores - 6.0).abs() < 1e-4, "{run:?}");
         assert!(run.overlapped);
+    }
+
+    /// Lease 35: a 7 s build inside a 20 s lease averaged 0.6 cores against a 2.9 peak.
+    fn short_burst_in_a_long_lease() -> RunMeter {
+        let mut meter = RunMeter::start(LeaseId(35), SessionKey("s".into()), false, &at(0, 0.0));
+        let burst = [1.0, 2.9, 2.5, 1.8, 1.6, 1.2, 1.0];
+        let cores = (0..20).map(|second| match second {
+            6..=12 => burst[second - 6],
+            _ => 0.03,
+        });
+        for (second, cores) in (1..).zip(cores) {
+            let mut sample = at(second * 1_000, 20.0);
+            sample.sessions = vec![session_usage("s", cores)];
+            meter.observe(&sample);
+        }
+        meter
+    }
+
+    #[test]
+    fn test_run_meter_busy_average_ignores_idle_samples_around_a_short_burst() {
+        let run = short_burst_in_a_long_lease().finish().unwrap();
+        // (12.0 + 13 * 0.03) / 20 over the lease, 12.0 / 7 over the busy samples.
+        assert!((run.holder_avg.cores - 0.6195).abs() < 1e-4, "{run:?}");
+        let busy = run.holder_busy.unwrap();
+        assert!((busy.cores - 12.0 / 7.0).abs() < 1e-4, "{run:?}");
+        assert_eq!(busy.gpu_pct, 0.0);
+        assert_eq!(run.holder_peak.cores, 2.9);
+    }
+
+    #[test]
+    fn test_run_meter_busy_counts_gpu_load_and_is_none_for_an_idle_session() {
+        let mut idle = RunMeter::start(LeaseId(1), SessionKey("s".into()), false, &at(0, 0.0));
+        let mut gpu = idle.clone();
+        for second in 1..=4 {
+            let mut sample = at(second * 1_000, 5.0);
+            sample.sessions = vec![session_usage("s", 0.1)];
+            idle.observe(&sample);
+            if second % 2 == 0 {
+                sample.sessions[0].usage.gpu_pct = 60.0;
+            }
+            gpu.observe(&sample);
+        }
+        assert_eq!(idle.finish().unwrap().holder_busy, None);
+        let busy = gpu.finish().unwrap().holder_busy.unwrap();
+        assert!((busy.cores - 0.1).abs() < 1e-4, "{busy:?}");
+        assert_eq!(busy.gpu_pct, 60.0);
     }
 }

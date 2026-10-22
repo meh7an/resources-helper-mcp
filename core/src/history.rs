@@ -2,8 +2,10 @@
 //!
 //! A request's estimate is the declared profile raised to the p90 of its similar runs, never
 //! lowered. Memory uses each run's peak because it must fit at its peak. CPU and GPU use each
-//! run's average: a build briefly touches every core, and reserving its one-second peak would
-//! make it wait for an idle machine. Raised values stop at what the machine can free, so a
+//! run's average while its session was busy: a build briefly touches every core, and reserving
+//! its one-second peak would make it wait for an idle machine, while the average over the whole
+//! lease counts the idle time around the command. Runs recorded before busy load was measured
+//! use their whole-lease average. Raised values stop at what the machine can free, so a
 //! learned profile never turns into a request that can never start.
 
 use rh_shared::{
@@ -22,7 +24,7 @@ pub const ESTIMATE_RUNS: usize = 20;
 /// What the similar runs of a request needed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Learned {
-    /// p90 of peak RAM and VRAM, of average cores and GPU load, and of run time.
+    /// p90 of peak RAM and VRAM, of busy cores and GPU load, and of run time.
     pub profile: JobProfile,
     /// Runs the values come from.
     pub runs: usize,
@@ -134,9 +136,11 @@ pub fn learned(runs: &[JobRun]) -> Option<Learned> {
     }
     let p90_of = |value: fn(&JobRun) -> f64| p90(clean.iter().map(|run| value(run)).collect());
     let profile = JobProfile {
-        cores: p90_of(|run| f64::from(run.avg.cores)) as f32,
+        cores: p90_of(|run| f64::from(run.busy.map_or(run.avg.cores, |busy| busy.cores))) as f32,
         ram_mb: p90_of(|run| run.peak.ram_mb as f64).round() as u64,
-        gpu_pct: (p90_of(|run| f64::from(run.avg.gpu_pct)) as f32).min(100.0),
+        gpu_pct: (p90_of(|run| f64::from(run.busy.map_or(run.avg.gpu_pct, |busy| busy.gpu_pct)))
+            as f32)
+            .min(100.0),
         vram_mb: p90_of(|run| run.peak.vram_mb as f64).round() as u64,
         est_secs: p90_of(|run| {
             admission::ms_to_secs_ceil(run.ended_at_ms - run.started_at_ms) as f64
@@ -286,7 +290,7 @@ fn raise(declared: f64, p90: f64, cap: Option<f64>) -> Option<Raised> {
 mod tests {
     use rh_shared::{
         config::ClassifierConfig,
-        types::{JobProfile, ResourceUsage},
+        types::{BusyUsage, JobProfile, ResourceUsage},
     };
 
     use super::*;
@@ -334,6 +338,7 @@ mod tests {
                 gpu_pct: 0.0,
                 vram_mb: 0,
             },
+            busy: None,
             started_at_ms: 1_000,
             ended_at_ms: 1_000 + secs * 1_000,
             noise: None,
@@ -407,6 +412,62 @@ mod tests {
         assert_eq!(learned.profile.cores, 5.5);
         assert_eq!(learned.profile.ram_mb, 2_500);
         assert_eq!(learned.profile.est_secs, 42);
+    }
+
+    /// A run like lease 35: a short burst at `busy_cores` inside a lease that averaged
+    /// `avg_cores`.
+    fn burst_run(avg_cores: f32, busy_cores: f32) -> JobRun {
+        JobRun {
+            busy: Some(BusyUsage {
+                cores: busy_cores,
+                gpu_pct: 0.0,
+            }),
+            ..run(avg_cores, 900, 20)
+        }
+    }
+
+    #[test]
+    fn test_learned_uses_busy_load_and_falls_back_to_the_average_for_older_runs() {
+        let learned = learned(&[burst_run(0.6, 1.7)]).unwrap();
+        assert_eq!(learned.profile.cores, 1.7);
+
+        let mut gpu = burst_run(0.6, 1.7);
+        gpu.avg.gpu_pct = 20.0;
+        gpu.busy = Some(BusyUsage {
+            cores: 1.7,
+            gpu_pct: 75.0,
+        });
+        assert_eq!(super::learned(&[gpu]).unwrap().profile.gpu_pct, 75.0);
+
+        // Older runs without busy load count with their average: one new run in ten stays
+        // under the p90, two lift it.
+        let mut mixed = vec![burst_run(0.6, 5.0)];
+        mixed.extend((0..9).map(|_| run(0.6, 900, 20)));
+        assert_eq!(super::learned(&mixed).unwrap().profile.cores, 0.6);
+        mixed[1] = burst_run(0.6, 5.0);
+        assert_eq!(super::learned(&mixed).unwrap().profile.cores, 5.0);
+    }
+
+    #[test]
+    fn test_estimate_from_short_bursts_in_long_leases_reflects_the_burst() {
+        // Lease 35's shape: 0.6 cores over the lease, 1.7 over the build. The averages alone
+        // stay below a 1-core declaration; the busy load raises it.
+        let small = JobProfile {
+            cores: 1.0,
+            ..declared()
+        };
+        let runs = [burst_run(0.6, 1.7), burst_run(0.6, 1.6)];
+        let estimate = estimate(&small, learned(&runs).as_ref(), &roomy());
+        assert_eq!(estimate.profile.cores, 1.7);
+        assert_eq!(
+            estimate.reasons,
+            ["cores 1.7 from p90 of 2 past run(s) (declared 1.0)"]
+        );
+
+        // A wide build held the same way: 3.1 cores over the lease, 12.4 while it compiled.
+        let wide = learned(&[burst_run(3.1, 12.4)]).unwrap();
+        let estimate = super::estimate(&declared(), Some(&wide), &roomy());
+        assert_eq!(estimate.profile.cores, 12.4);
     }
 
     #[test]

@@ -28,6 +28,8 @@ diesel::table! {
         noise_peak_gpu_pct -> Nullable<Float>,
         noise_quiet_at_start -> Nullable<Bool>,
         overlapped -> Bool,
+        busy_cores -> Nullable<Float>,
+        busy_gpu_pct -> Nullable<Float>,
     }
 }
 

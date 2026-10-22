@@ -404,6 +404,7 @@ fn job_run(state: &AppState, lease: &Lease, run: &MeteredRun, ended_at_ms: i64) 
         declared: lease.profile,
         peak: run.holder_peak,
         avg: run.holder_avg,
+        busy: run.holder_busy,
         started_at_ms: lease.granted_at_ms.unwrap_or(lease.requested_at_ms),
         ended_at_ms,
         noise: (lease.kind == LeaseKind::BenchmarkExclusive).then_some(run.noise),

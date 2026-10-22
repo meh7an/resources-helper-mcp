@@ -882,6 +882,37 @@ async fn test_released_run_raises_the_next_estimate_and_shows_in_history() {
     daemon.stop().await;
 }
 
+#[tokio::test]
+async fn test_short_burst_in_a_long_lease_raises_the_next_estimate_to_the_burst() {
+    let daemon = Daemon::start().await;
+    let set_alice_cores = |cores| {
+        daemon.machine.lock().unwrap().processes[0].usage.cores = cores;
+    };
+    // Like lease 35: idle around a short build, so the whole-lease average stays low.
+    set_alice_cores(0.03);
+    let first = daemon.acquire_build(alice(), 0).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    set_alice_cores(12.0);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    set_alice_cores(0.03);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    daemon.release_response(first.lease.id, "alice").await;
+
+    let path = "/history/runs?fingerprint=cargo%20build%7C&limit=5";
+    let runs: HistoryRunsResponse = daemon.get(path).await.json().await.unwrap();
+    let run = &runs.runs[0];
+    assert!(run.avg.cores < 8.0, "{run:?}");
+    assert_eq!(run.busy.map(|busy| busy.cores), Some(12.0), "{run:?}");
+
+    let second = daemon.acquire_build(bob(), 0).await;
+    assert_eq!(second.lease.profile.cores, 12.0);
+    assert_eq!(
+        second.verdict.reasons,
+        ["cores 12.0 from p90 of 1 past run(s) (declared 8.0)"]
+    );
+    daemon.stop().await;
+}
+
 /// Holds an active lease for alice and starts bob's acquire, which waits up to 60 s behind it.
 async fn open_acquire_wait(daemon: &Daemon) -> JoinHandle<Response> {
     daemon.acquire_build(alice(), 0).await;
