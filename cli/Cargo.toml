@@ -1,7 +1,16 @@
 [package]
 name = "rh"
-version = "0.1.0"
-edition = "2024"
+description = "CLI for resources-helper: status, leases, history, daemon control, install, and the PreToolUse hook"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"

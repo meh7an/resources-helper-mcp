@@ -1,3 +1,15 @@
 [workspace]
 resolver = "3"
 members = ["cli","client","core", "daemon", "mcp", "sampler","shared"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+authors = ["Mehran <hi@mehran.tech>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/meh7an/resources-helper-mcp"
+readme = "README.md"
+keywords = ["claude-code", "mcp", "scheduling", "windows", "cpu"]
+categories = ["command-line-utilities", "development-tools", "os::windows-apis"]
+publish = false

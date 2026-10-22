@@ -1,0 +1,46 @@
+name: Bug report
+description: Something does not work as described in the README or runbook.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start two Claude Code sessions
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: rh daemon status and rh status
+      description: The output of both commands. Remove anything private.
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant rhd.log lines
+      description: From `%USERPROFILE%\.resources-helper\logs\rhd.log`, if any.
+      render: text
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: input
+    id: claude-code
+    attributes:
+      label: Claude Code version and surface
+      placeholder: 2.1.308, desktop app
+    validations:
+      required: true
