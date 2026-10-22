@@ -146,7 +146,7 @@ impl Client {
     pub async fn health(&self) -> Result<HealthResponse> {
         let url = self.url("/health");
         let response = self.http.get(&url).send().await;
-        let response = response.map_err(|error| unreachable_error(&url, &error))?;
+        let response = response.map_err(|error| transport_error(&url, &error))?;
         decode(checked(response).await?).await
     }
 
@@ -345,7 +345,7 @@ impl Client {
         let url = self.url("/shutdown");
         let token = self.token()?;
         let response = self.http.post(&url).bearer_auth(token).send().await;
-        checked(response.map_err(|error| unreachable_error(&url, &error))?).await?;
+        checked(response.map_err(|error| transport_error(&url, &error))?).await?;
         Ok(())
     }
 
@@ -361,20 +361,30 @@ impl Client {
         decode(response).await
     }
 
-    /// Sends the request `build` makes; when the daemon is unreachable and spawning is
-    /// allowed, starts it and sends once more.
+    /// Sends the request `build` makes. When no daemon received it and spawning is allowed,
+    /// starts one and sends once more; when the token was refused, reads the token file again
+    /// and sends once more.
     async fn execute<F>(&self, build: F) -> Result<Response>
     where
         F: Fn(&reqwest::Client, &str) -> RequestBuilder,
     {
         match self.attempt(&build).await {
-            Err(error) if error.is_unreachable() => match &self.options.spawn {
+            Err(error) if error.is_unsent() => match &self.options.spawn {
                 Some(spawn) => {
                     self.start_daemon(spawn).await?;
                     self.attempt(&build).await
                 }
                 None => Err(error),
             },
+            // The daemon writes a new token when its token file was deleted, and a long-lived
+            // client still holds the old one.
+            Err(error)
+                if error.status() == Some(401)
+                    && matches!(self.options.token, TokenSource::File(_)) =>
+            {
+                self.forget_token();
+                self.attempt(&build).await
+            }
             other => other,
         }
     }
@@ -387,7 +397,7 @@ impl Client {
         let response = build(&self.http, &token)
             .send()
             .await
-            .map_err(|error| unreachable_error(&self.options.base_url, &error))?;
+            .map_err(|error| transport_error(&self.options.base_url, &error))?;
         checked(response).await
     }
 
@@ -436,10 +446,15 @@ impl Client {
     }
 }
 
-fn unreachable_error(url: &str, error: &reqwest::Error) -> ClientError {
-    ClientError::Unreachable {
-        url: url.to_owned(),
-        reason: error.to_string(),
+/// [`ClientError::Unreachable`] when no connection was made, else
+/// [`ClientError::Interrupted`], since the daemon may have received the request.
+fn transport_error(url: &str, error: &reqwest::Error) -> ClientError {
+    let url = url.to_owned();
+    let reason = error.to_string();
+    if error.is_connect() {
+        ClientError::Unreachable { url, reason }
+    } else {
+        ClientError::Interrupted { url, reason }
     }
 }
 

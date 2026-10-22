@@ -100,6 +100,11 @@ fn format_status(
         health.pid,
         duration(i64::try_from(health.uptime_secs).unwrap_or(i64::MAX) * 1_000)
     );
+    if let Some(error) = &health.config_error {
+        text.push_str(&format!(
+            "config  REJECTED, still using the previous one: {error}\n"
+        ));
+    }
     text.push_str(&format!(
         "cpu     {:5.1}% (10s {:.1}%, 60s {:.1}%) of {} logical cores\n",
         cpu.avg_1s, cpu.avg_10s, cpu.avg_60s, snapshot.cpu.logical_cores
@@ -298,6 +303,7 @@ mod tests {
             version: "0.1.0".into(),
             pid: 1_234,
             uptime_secs: 3_725,
+            config_error: None,
         };
         let leases = [
             lease(12, "3f2a9c1e-aaaa-bbbb", LeaseState::Active),
@@ -322,6 +328,22 @@ mod tests {
         );
         assert!(
             text.contains("  77777777  (not sampled) lease 13"),
+            "{text}"
+        );
+        assert!(!text.contains("config"), "{text}");
+    }
+
+    #[test]
+    fn test_format_status_shows_a_rejected_config() {
+        let health = HealthResponse {
+            version: "0.1.0".into(),
+            pid: 1_234,
+            uptime_secs: 5,
+            config_error: Some("config.toml: invalid configuration: x".into()),
+        };
+        let text = format_status(&health, &snapshot(), &[], 0);
+        assert!(
+            text.contains("config  REJECTED, still using the previous one: config.toml:"),
             "{text}"
         );
     }

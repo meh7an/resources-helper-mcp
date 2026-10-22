@@ -83,6 +83,7 @@ pub(crate) fn snapshot() -> Snapshot {
 #[derive(Debug, Default)]
 pub(crate) struct MockDaemon {
     unreachable: bool,
+    interrupted: bool,
     state: Mutex<MockState>,
 }
 
@@ -99,6 +100,14 @@ impl MockDaemon {
     pub(crate) fn unreachable() -> Self {
         Self {
             unreachable: true,
+            ..Self::default()
+        }
+    }
+
+    /// A daemon that receives every call but never answers, as when it crashes mid-request.
+    pub(crate) fn interrupted() -> Self {
+        Self {
+            interrupted: true,
             ..Self::default()
         }
     }
@@ -137,6 +146,12 @@ impl MockDaemon {
             return Err(ClientError::Unreachable {
                 url: "http://127.0.0.1:47823".into(),
                 reason: "connection refused".into(),
+            });
+        }
+        if self.interrupted {
+            return Err(ClientError::Interrupted {
+                url: "http://127.0.0.1:47823".into(),
+                reason: "connection closed before message completed".into(),
             });
         }
         make(&mut self.lock())

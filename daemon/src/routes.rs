@@ -42,7 +42,7 @@ const MAX_ACQUIRE_WAIT: Duration = Duration::from_secs(120);
 // Overlapped runs are skipped, so an estimate reads more rows than it uses.
 const ESTIMATE_SCAN: u32 = ESTIMATE_RUNS as u32 * 5;
 
-// Rows the history summary groups; M6.1's pruning keeps the table well below this.
+// Rows the history summary groups; the default retention cap keeps the table at or below it.
 const SUMMARY_SCAN: u32 = 5_000;
 
 const DEFAULT_HISTORY_RUNS: u32 = 20;
@@ -87,6 +87,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         pid: std::process::id(),
         uptime_secs: state.started.elapsed().as_secs(),
+        config_error: state.config_error(),
     })
 }
 
@@ -122,7 +123,7 @@ async fn can_fit(
     State(state): State<AppState>,
     Json(request): Json<CanFitRequest>,
 ) -> Result<Json<Verdict>, AppError> {
-    let (declared, _) = resolve_profile(&state.config, &request.profile)?;
+    let (declared, _) = resolve_profile(&state.settings().config, &request.profile)?;
     let latest = state.latest().ok_or(AppError::Unavailable)?;
     let estimate = match &request.label {
         Some(label) => {
@@ -155,7 +156,7 @@ async fn estimate(
     let Some(latest) = state.latest() else {
         return Ok(unchanged);
     };
-    let fingerprint = history::fingerprint(&state.classifier, label, cwd);
+    let fingerprint = history::fingerprint(&state.settings().classifier, label, cwd);
     let runs = state
         .with_db(move |conn| repo::recent_job_runs(conn, &fingerprint, ESTIMATE_SCAN))
         .await?;
@@ -203,14 +204,13 @@ async fn acquire(
     State(state): State<AppState>,
     Json(request): Json<AcquireRequest>,
 ) -> Result<Json<AcquireResponse>, AppError> {
-    let (declared, class) = resolve_profile(&state.config, &request.profile)?;
+    let (declared, class) = resolve_profile(&state.settings().config, &request.profile)?;
     let cwd = request.cwd.unwrap_or_default();
     let estimate = estimate(&state, declared, &request.label, &cwd).await?;
     state.register(request.holder.clone());
     let session = request.holder.session.clone();
     let now = now_ms();
-    let ttl_ms = i64::try_from(state.config.leases.heartbeat_ttl_secs.saturating_mul(1_000))
-        .unwrap_or(i64::MAX);
+    let ttl_ms = i64::try_from(state.heartbeat_ttl().as_millis()).unwrap_or(i64::MAX);
     let draft = LeaseDraft {
         holder: request.holder,
         kind: request.kind,
@@ -272,7 +272,7 @@ async fn wait_for_grant(
     let deadline = Instant::now() + wait;
     // The client can only heartbeat the lease once this response names it, and the open
     // request already proves the holder is alive, so the wait keeps the lease from expiring.
-    let renew_every = Duration::from_secs(state.config.leases.heartbeat_ttl_secs) / 3;
+    let renew_every = state.heartbeat_ttl() / 3;
     let mut renew_at = Instant::now() + renew_every;
     while is_queued(state, id).await {
         let now = Instant::now();
@@ -385,7 +385,7 @@ async fn release(
 fn job_run(state: &AppState, lease: &Lease, run: &MeteredRun, ended_at_ms: i64) -> JobRun {
     JobRun {
         lease_id: Some(lease.id),
-        fingerprint: history::fingerprint(&state.classifier, &lease.label, &lease.cwd),
+        fingerprint: history::fingerprint(&state.settings().classifier, &lease.label, &lease.cwd),
         command: lease.label.clone(),
         cwd: lease.cwd.clone(),
         declared: lease.profile,

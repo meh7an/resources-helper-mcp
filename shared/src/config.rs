@@ -23,6 +23,8 @@ pub struct Config {
     pub benchmark: BenchmarkConfig,
     /// Lease lifetime settings.
     pub leases: LeaseConfig,
+    /// How long ended leases and job history are kept.
+    pub retention: RetentionConfig,
     /// PreToolUse hook behavior.
     pub hook: HookConfig,
     /// The profile behind each [`JobClass`].
@@ -48,14 +50,18 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] when the file exists but cannot be read, and the errors of
-    /// [`Config::from_toml`] when its contents are invalid.
+    /// Returns [`Error::ConfigFile`] naming `path` when the file exists but cannot be read,
+    /// or holds what [`Config::from_toml`] rejects.
     pub fn load(path: &Path) -> Result<Self> {
-        match fs::read_to_string(path) {
+        let loaded = match fs::read_to_string(path) {
             Ok(text) => Self::from_toml(&text),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(error) => Err(error.into()),
-        }
+        };
+        loaded.map_err(|reason| Error::ConfigFile {
+            path: path.to_owned(),
+            reason: Box::new(reason),
+        })
     }
 
     /// Checks every value against its allowed range.
@@ -88,6 +94,23 @@ impl Config {
         ensure(
             self.leases.heartbeat_ttl_secs > 0,
             "leases.heartbeat_ttl_secs must be positive",
+        )?;
+        let retention = &self.retention;
+        ensure(
+            retention.lease_days > 0,
+            "retention.lease_days must be positive",
+        )?;
+        ensure(
+            retention.history_days > 0,
+            "retention.history_days must be positive",
+        )?;
+        ensure(
+            retention.keep_runs_per_job > 0,
+            "retention.keep_runs_per_job must be positive",
+        )?;
+        ensure(
+            retention.max_job_runs >= retention.keep_runs_per_job,
+            "retention.max_job_runs must be at least keep_runs_per_job",
         )?;
         for class in JobClass::ALL {
             if let Some(reason) = self.classes.get(class).invalid_reason() {
@@ -194,6 +217,34 @@ impl Default for LeaseConfig {
     fn default() -> Self {
         Self {
             heartbeat_ttl_secs: 60,
+        }
+    }
+}
+
+/// How long ended leases and job history are kept. The daemon prunes once an hour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RetentionConfig {
+    /// Released and expired leases, with their audit trail, are deleted this many days after
+    /// they ended.
+    pub lease_days: u64,
+    /// Job runs are deleted this many days after they ended, except the newest
+    /// `keep_runs_per_job` of each job.
+    pub history_days: u64,
+    /// Runs of each job kept regardless of age, so estimates survive long breaks. The
+    /// estimator reads the newest 20.
+    pub keep_runs_per_job: u64,
+    /// Hard cap on stored job runs; the oldest beyond it are deleted whatever their job.
+    pub max_job_runs: u64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            lease_days: 30,
+            history_days: 90,
+            keep_runs_per_job: 20,
+            max_job_runs: 5_000,
         }
     }
 }
@@ -388,6 +439,7 @@ mod tests {
     use std::env;
 
     use super::*;
+    use crate::mutate::mutations;
 
     fn config_error(text: &str) -> String {
         match Config::from_toml(text) {
@@ -498,6 +550,59 @@ mod tests {
         assert!(config_error(short_wait).contains("max_quiet_wait_secs"));
         assert!(config_error("[leases]\nheartbeat_ttl_secs = 0\n").contains("heartbeat_ttl"));
         assert!(config_error("[classes.mixed]\ngpu_pct = 150\n").contains("classes.mixed"));
+        assert!(config_error("[retention]\nlease_days = 0\n").contains("retention.lease_days"));
+        assert!(config_error("[retention]\nhistory_days = 0\n").contains("history_days"));
+        assert!(config_error("[retention]\nkeep_runs_per_job = 0\n").contains("keep_runs"));
+        let small_cap = "[retention]\nkeep_runs_per_job = 50\nmax_job_runs = 10\n";
+        assert!(config_error(small_cap).contains("retention.max_job_runs"));
+    }
+
+    #[test]
+    fn test_config_load_invalid_file_names_the_file_and_the_key() {
+        let path = env::temp_dir().join(format!("rh-shared-test-bad-{}.toml", std::process::id()));
+        fs::write(&path, "[leases]\nheartbeat_ttl_secs = 0\n").unwrap();
+        let loaded = Config::load(&path);
+        fs::remove_file(&path).unwrap();
+        let message = loaded.unwrap_err().to_string();
+        assert!(
+            message.starts_with(&path.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("leases.heartbeat_ttl_secs"), "{message}");
+    }
+
+    #[test]
+    fn test_config_malformed_documents_fail_without_panicking() {
+        let text = toml::to_string(&Config::default()).unwrap();
+        for variant in mutations(&text, 0x5eed, 2_000) {
+            match Config::from_toml(&variant) {
+                Ok(config) => config.validate().unwrap(),
+                Err(error) => assert!(!error.to_string().is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn test_config_wrongly_typed_value_names_its_key() {
+        let text = toml::to_string(&Config::default()).unwrap();
+        let mut checked = 0;
+        for (index, line) in text.lines().enumerate() {
+            let Some((key, _)) = line.split_once(" = ") else {
+                continue;
+            };
+            for wrong in ["\"text\"", "[1, 2]", "{ x = 1 }", "-1", "true", "1.5", "0"] {
+                let mut lines: Vec<&str> = text.lines().collect();
+                let replaced = format!("{key} = {wrong}");
+                lines[index] = &replaced;
+                // A replacement of the right type and range is simply accepted.
+                if let Err(error) = Config::from_toml(&lines.join("\n")) {
+                    let message = error.to_string();
+                    assert!(message.contains(key.trim()), "{key} = {wrong}: {message}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 50, "only {checked} rejections were checked");
     }
 
     #[test]

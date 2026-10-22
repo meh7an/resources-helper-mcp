@@ -41,6 +41,10 @@ impl Drop for Home {
 }
 
 fn run(home: &Home, args: &[&str], stdin: &str) -> Output {
+    run_bytes(home, args, stdin.as_bytes())
+}
+
+fn run_bytes(home: &Home, args: &[&str], stdin: &[u8]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rh"))
         .args(args)
         .env("USERPROFILE", &home.0)
@@ -49,12 +53,7 @@ fn run(home: &Home, args: &[&str], stdin: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     output
@@ -111,4 +110,34 @@ fn test_hook_garbage_input_warns_and_exits_zero() {
     let home = Home::new("garbage", "");
     let json = stdout_json(&run(&home, &["hook", "pre-tool"], "{\"tool_name\":"));
     assert!(json["systemMessage"].is_string(), "{json}");
+}
+
+#[test]
+fn test_hook_unreadable_input_warns_and_exits_zero() {
+    let home = Home::new("bytes", "");
+    let mut huge = BASH_CARGO_BUILD.as_bytes().to_vec();
+    huge.extend(std::iter::repeat_n(b' ', 4 << 20));
+    for stdin in [
+        &b"\xff\xfe{\"tool_name\":\"Bash\"}"[..],
+        b"",
+        b"\0\0\0",
+        &huge,
+    ] {
+        let output = run_bytes(&home, &["hook", "pre-tool"], stdin);
+        if !output.stdout.is_empty() {
+            assert!(
+                stdout_json(&output)["systemMessage"].is_string(),
+                "{output:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_hook_invalid_config_warns_with_the_file_and_key() {
+    let home = Home::new("config", "[leases]\nheartbeat_ttl_secs = 0\n");
+    let json = stdout_json(&run(&home, &["hook", "pre-tool"], BASH_CARGO_BUILD));
+    let message = json["systemMessage"].as_str().unwrap();
+    assert!(message.contains("config.toml"), "{message}");
+    assert!(message.contains("leases.heartbeat_ttl_secs"), "{message}");
 }

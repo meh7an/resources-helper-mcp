@@ -14,6 +14,10 @@ pub struct HealthResponse {
     pub pid: u32,
     /// Seconds since the daemon started.
     pub uptime_secs: u64,
+    /// Why the last change to `config.toml` was rejected; the daemon keeps the config it had
+    /// until the file is fixed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
 }
 
 /// How a request states the resources a job needs.
@@ -263,6 +267,7 @@ mod tests {
             version: "0.1.0".into(),
             pid: 4242,
             uptime_secs: 3600,
+            config_error: Some("config.toml: invalid configuration: x".into()),
         });
     }
 

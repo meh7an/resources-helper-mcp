@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use rh_client::ClientError;
 use rh_shared::{
     api::{AcquireRequest, CanFitRequest, LeaseQuery, Verdict},
     types::{Holder, JobProfile, Lease, LeaseId, LeaseKind, LeaseState, NoiseReport},
@@ -138,7 +139,16 @@ impl<C: DaemonApi> RhServer<C> {
                 .client
                 .wait(LeaseId(id), &self.holder.session, wait_timeout_secs)
                 .await
-                .map_err(|e| e.to_string())?,
+                .map_err(|error| {
+                    let mut message = error.to_string();
+                    if matches!(error, ClientError::Interrupted { .. }) {
+                        message.push_str(&format!(
+                            ". A restarted rhd keeps the lease: call acquire_lease with only \
+                             lease_id {id} again."
+                        ));
+                    }
+                    message
+                })?,
             None => {
                 if params.label.trim().is_empty() {
                     return Err("give `label`, the command the lease is for".to_owned());
@@ -151,10 +161,17 @@ impl<C: DaemonApi> RhServer<C> {
                     cwd: Some(self.cwd_or_default(params.cwd)),
                     wait_timeout_secs,
                 };
-                self.client
-                    .acquire(&request)
-                    .await
-                    .map_err(|e| e.to_string())?
+                self.client.acquire(&request).await.map_err(|error| {
+                    let mut message = error.to_string();
+                    if matches!(error, ClientError::Interrupted { .. }) {
+                        message.push_str(
+                            ". The lease may exist anyway: call list_leases, then resume it with \
+                             acquire_lease and only its lease_id, or release it. Do not run \
+                             the command before a lease is active.",
+                        );
+                    }
+                    message
+                })?
             }
         };
         let lease = response.lease;
@@ -495,6 +512,25 @@ mod tests {
         let (server, _) = server_with(MockDaemon::unreachable());
         let error = server.system_snapshot().await.unwrap_err();
         assert!(error.contains("not reachable"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn test_interrupted_acquire_says_how_to_find_or_resume_the_lease() {
+        let (server, _) = server_with(MockDaemon::interrupted());
+        let error = server
+            .acquire_lease(acquire(ClassParam::CpuHeavy))
+            .await
+            .unwrap_err();
+        assert!(error.contains("did not answer"), "{error}");
+        assert!(error.contains("call list_leases"), "{error}");
+
+        let resume = Parameters(AcquireParams {
+            lease_id: Some(7),
+            ..AcquireParams::default()
+        });
+        let error = server.acquire_lease(resume).await.unwrap_err();
+        assert!(error.contains("only lease_id 7 again"), "{error}");
+        assert!(server.held.ids().is_empty());
     }
 
     #[test]

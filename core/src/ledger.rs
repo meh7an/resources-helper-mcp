@@ -84,6 +84,9 @@ pub enum LedgerError {
     /// A lease with this ID is already tracked.
     #[error("lease {} is already tracked", .0.0)]
     AlreadyTracked(LeaseId),
+    /// Only queued and active leases can be restored.
+    #[error("lease {} has already ended", .0.0)]
+    Ended(LeaseId),
 }
 
 /// A lease its holder ended, with what it measured while it was active.
@@ -179,6 +182,35 @@ impl Ledger {
         }
         self.leases.push(lease);
         Ok(())
+    }
+
+    /// Tracks a lease that a previous daemon run left queued or active, in its state and at
+    /// the back of the queue, so restore leases oldest first. Its heartbeat deadline moves to
+    /// at least one TTL from `now_ms`, which gives the holder time to reach the new daemon; a
+    /// dead holder is reaped on the next tick. An active lease gets no meter: the samples from
+    /// before the restart are gone, so its run is not recorded.
+    ///
+    /// # Errors
+    ///
+    /// [`LedgerError::Ended`] when the lease is neither queued nor active, and
+    /// [`LedgerError::AlreadyTracked`] when its ID is already in the ledger.
+    pub fn restore(&mut self, mut lease: Lease, now_ms: i64) -> Result<&Lease, LedgerError> {
+        if !matches!(lease.state, LeaseState::Queued | LeaseState::Active) {
+            return Err(LedgerError::Ended(lease.id));
+        }
+        if self.leases.iter().any(|tracked| tracked.id == lease.id) {
+            return Err(LedgerError::AlreadyTracked(lease.id));
+        }
+        let fresh_deadline = now_ms.saturating_add(self.settings.heartbeat_ttl_ms);
+        lease.expires_at_ms = lease.expires_at_ms.max(fresh_deadline);
+        self.leases.push(lease);
+        Ok(&self.leases[self.leases.len() - 1])
+    }
+
+    /// Replaces the settings after a config reload. Deadlines already set keep their old TTL
+    /// until the next heartbeat.
+    pub fn set_settings(&mut self, settings: LedgerSettings) {
+        self.settings = settings;
     }
 
     /// Moves a lease's heartbeat deadline to one TTL from `now_ms`.
@@ -1230,6 +1262,72 @@ mod tests {
         let second = ledger.verdict_for(LeaseId(3), &idle(), 1_000).unwrap();
         assert!(has_reason(&second, "1 lease(s) queued ahead"), "{second:?}");
         assert_eq!(ledger.verdict_for(LeaseId(9), &idle(), 1_000), None);
+    }
+
+    #[test]
+    fn test_restore_keeps_state_and_order_and_gives_a_fresh_deadline() {
+        let mut ledger = Ledger::new(settings());
+        let mut active = queued_lease(1, "s", timed(8.0, 300), LeaseKind::Normal, 0);
+        active.state = LeaseState::Active;
+        active.granted_at_ms = Some(1_000);
+        active.expires_at_ms = 5_000;
+        let mut late = queued_lease(2, "s", timed(12.0, 300), LeaseKind::Normal, 0);
+        late.expires_at_ms = 500_000;
+
+        let restored = ledger.restore(active, 200_000).unwrap();
+        assert_eq!(restored.expires_at_ms, 200_000 + TTL_MS);
+        let restored = ledger.restore(late, 200_000).unwrap();
+        assert_eq!(restored.expires_at_ms, 500_000);
+        assert_eq!(
+            states(&ledger),
+            [(1, LeaseState::Active), (2, LeaseState::Queued)]
+        );
+        // The restored active lease still holds its cores, so lease 2 waits for it.
+        assert!(granted(&ledger.tick(201_000, &idle(), &alive())).is_empty());
+    }
+
+    #[test]
+    fn test_restored_active_lease_is_released_without_a_run() {
+        let mut ledger = Ledger::new(settings());
+        let mut active = queued_lease(1, "s", timed(2.0, 300), LeaseKind::Normal, 0);
+        active.state = LeaseState::Active;
+        active.granted_at_ms = Some(0);
+        ledger.restore(active, 10_000).unwrap();
+        tick_seconds(&mut ledger, 11, 12, 0.0);
+
+        let released = ledger.release(LeaseId(1), &session("s"), 13_000).unwrap();
+        assert_eq!(released.lease.state, LeaseState::Released);
+        assert_eq!(released.run, None);
+    }
+
+    #[test]
+    fn test_restored_lease_of_a_dead_holder_is_reaped_on_the_first_tick() {
+        let mut ledger = Ledger::new(settings());
+        let mut active = queued_lease(1, "gone", timed(2.0, 300), LeaseKind::Normal, 0);
+        active.state = LeaseState::Active;
+        ledger.restore(active, 10_000).unwrap();
+
+        let dead = Dead(HashSet::from([holder("gone").pid]));
+        let transitions = ledger.tick(11_000, &idle(), &dead);
+        assert_eq!(transitions[0].reason, "holder process exited");
+        assert!(ledger.leases().is_empty());
+    }
+
+    #[test]
+    fn test_restore_refuses_ended_and_tracked_leases() {
+        let mut ledger = Ledger::new(settings());
+        enqueue(&mut ledger, 1, 1.0, 300, 0);
+        let duplicate = queued_lease(1, "s", profile(1.0, 1), LeaseKind::Normal, 0);
+        assert_eq!(
+            ledger.restore(duplicate, 0).map(|lease| lease.id),
+            Err(LedgerError::AlreadyTracked(LeaseId(1)))
+        );
+        let mut ended = queued_lease(2, "s", profile(1.0, 1), LeaseKind::Normal, 0);
+        ended.state = LeaseState::Expired;
+        assert_eq!(
+            ledger.restore(ended, 0).map(|lease| lease.id),
+            Err(LedgerError::Ended(LeaseId(2)))
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@
 pub mod api;
 pub mod config;
 mod error;
+pub mod mutate;
 pub mod paths;
 #[cfg(test)]
 mod test_support;

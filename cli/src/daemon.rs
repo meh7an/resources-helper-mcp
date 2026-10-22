@@ -36,7 +36,7 @@ pub fn start() -> anyhow::Result<()> {
 pub fn stop() -> anyhow::Result<()> {
     let client = BlockingClient::discover(false)?;
     match client.shutdown() {
-        Err(error) if error.is_unreachable() => {
+        Err(error) if error.is_unsent() => {
             println!("rhd is not running");
             return Ok(());
         }
@@ -64,13 +64,18 @@ pub fn stop() -> anyhow::Result<()> {
 pub fn status() -> anyhow::Result<()> {
     let client = BlockingClient::discover(false)?;
     match client.health() {
-        Ok(health) => println!(
-            "rhd {} running at {} (pid {}, up {} s)",
-            health.version,
-            client.base_url(),
-            health.pid,
-            health.uptime_secs
-        ),
+        Ok(health) => {
+            println!(
+                "rhd {} running at {} (pid {}, up {} s)",
+                health.version,
+                client.base_url(),
+                health.pid,
+                health.uptime_secs
+            );
+            if let Some(error) = health.config_error {
+                println!("config rejected, rhd keeps the previous one: {error}");
+            }
+        }
         Err(error) if error.is_unreachable() => {
             println!("rhd is not running at {}", client.base_url());
         }

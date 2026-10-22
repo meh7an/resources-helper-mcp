@@ -482,4 +482,56 @@ mod tests {
     fn test_render_pass_prints_nothing() {
         assert_eq!(render(&Outcome::Pass), None);
     }
+
+    /// Whatever the payload, the hook decides without panicking and prints valid JSON or
+    /// nothing; heavy commands only reach the daemon lookup.
+    fn assert_decides_cleanly(payload: &str) {
+        let outcome = evaluate(payload, &Config::default(), unreachable);
+        if let Some(json) = render(&outcome) {
+            serde_json::from_str::<Value>(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_evaluate_malformed_payloads_never_panic() {
+        let fixtures = [
+            BASH_CARGO_BUILD,
+            BASH_LIGHT,
+            BASH_HELP,
+            BASH_TRAIN,
+            POWERSHELL_CARGO_TEST,
+            READ_TOOL,
+        ];
+        for (seed, fixture) in (1..).zip(fixtures) {
+            for payload in rh_shared::mutate::mutations(fixture, seed, 500) {
+                assert_decides_cleanly(&payload);
+            }
+        }
+    }
+
+    #[test]
+    fn test_evaluate_wrongly_typed_fields_warn() {
+        let fixture: Value = serde_json::from_str(BASH_CARGO_BUILD).unwrap();
+        let wrong = [
+            Value::Null,
+            serde_json::json!(42),
+            serde_json::json!(["cargo", "build"]),
+            serde_json::json!({ "command": 1 }),
+        ];
+        for field in ["session_id", "tool_name", "tool_input"] {
+            for value in &wrong {
+                let mut payload = fixture.clone();
+                payload[field] = value.clone();
+                let outcome = evaluate(&payload.to_string(), &Config::default(), never);
+                assert!(
+                    matches!(&outcome, Outcome::Warn(message) if message.contains("hook input")),
+                    "{field} = {value}: {outcome:?}"
+                );
+            }
+        }
+        let mut payload = fixture;
+        payload["tool_input"]["command"] = serde_json::json!(["cargo", "build"]);
+        let outcome = evaluate(&payload.to_string(), &Config::default(), never);
+        assert!(matches!(outcome, Outcome::Warn(_)), "{outcome:?}");
+    }
 }

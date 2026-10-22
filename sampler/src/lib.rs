@@ -269,25 +269,53 @@ mod tests {
         assert!(raw.memory.commit_used_mb <= raw.memory.commit_limit_mb);
     }
 
-    #[test]
-    fn test_system_sampler_counts_a_process_started_since_the_previous_sample() {
-        let mut sampler = SystemSampler::new().unwrap();
-        let mut burner = process::Command::new("powershell")
+    /// A PowerShell loop that keeps one core busy for `millis`.
+    fn busy_child(millis: u32) -> process::Child {
+        process::Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
-                "$t = [Environment]::TickCount; \
-                 while ([Environment]::TickCount - $t -lt 3000) {}",
+                &format!(
+                    "$t = [Environment]::TickCount; \
+                     while ([Environment]::TickCount - $t -lt {millis}) {{}}"
+                ),
             ])
             .spawn()
-            .unwrap();
+            .unwrap()
+    }
+
+    fn sampled_cores(raw: &RawSample, pid: u32) -> f32 {
+        let child = raw.processes.iter().find(|p| p.pid == pid);
+        child.expect("the child is sampled").usage.cores
+    }
+
+    #[test]
+    fn test_system_sampler_counts_a_process_started_since_the_previous_sample() {
+        let mut sampler = SystemSampler::new().unwrap();
+        let mut burner = busy_child(3_000);
         thread::sleep(Duration::from_millis(1_500));
         let raw = sampler.sample().unwrap();
         burner.kill().ok();
         burner.wait().ok();
 
-        let child = raw.processes.iter().find(|p| p.pid == burner.id());
-        let cores = child.expect("the child is sampled").usage.cores;
+        let cores = sampled_cores(&raw, burner.id());
         assert!(cores > 0.3, "a busy new process read {cores} cores");
+    }
+
+    #[test]
+    fn test_system_sampler_first_sample_reads_a_process_that_was_already_running() {
+        let mut burner = busy_child(4_000);
+        thread::sleep(Duration::from_millis(1_000));
+        let mut sampler = SystemSampler::new().unwrap();
+        thread::sleep(Duration::from_millis(1_000));
+        let raw = sampler.sample().unwrap();
+        burner.kill().ok();
+        burner.wait().ok();
+
+        let cores = sampled_cores(&raw, burner.id());
+        assert!(
+            cores > 0.5,
+            "a busy running process read {cores} cores in the first sample"
+        );
     }
 }

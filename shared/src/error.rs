@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 /// Errors shared by every crate in the workspace.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -8,6 +10,15 @@ pub enum Error {
     /// The configuration file is not valid TOML, has an unknown key, or has a wrongly typed value.
     #[error("invalid configuration file: {0}")]
     ConfigParse(#[from] toml::de::Error),
+    /// A configuration file could not be read or holds an invalid value; names the file so
+    /// the user knows what to fix.
+    #[error("{}: {reason}", path.display())]
+    ConfigFile {
+        /// The file that was read.
+        path: PathBuf,
+        /// What was wrong with it.
+        reason: Box<Error>,
+    },
     /// Reading system or GPU counters failed.
     #[error("sampling failed: {0}")]
     Sampler(String),

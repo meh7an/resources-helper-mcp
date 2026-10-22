@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, PoisonError, RwLock},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use diesel::sqlite::SqliteConnection;
@@ -55,15 +55,27 @@ pub struct Latest {
     pub processes: ProcessTable,
 }
 
+/// The configuration in effect and what is built from it; replaced as a whole on reload.
+#[derive(Debug)]
+pub struct Settings {
+    /// The loaded configuration.
+    pub config: Config,
+    /// The config's heavy-command rules, which fingerprint jobs for history.
+    pub classifier: Classifier,
+}
+
+impl Settings {
+    fn new(config: Config) -> Self {
+        let classifier = Classifier::new(&config.classifier);
+        Self { config, classifier }
+    }
+}
+
 /// Everything the daemon shares between tasks.
 #[derive(Debug)]
 pub struct Shared {
-    /// The loaded configuration.
-    pub config: Config,
     /// The bearer token every authenticated request must carry.
     pub token: String,
-    /// The config's heavy-command rules, which fingerprint jobs for history.
-    pub classifier: Classifier,
     /// Database connections.
     pub pool: DbPool,
     /// The ledger. It stays locked while its transitions are written, so the database sees
@@ -75,6 +87,8 @@ pub struct Shared {
     pub shutdown: watch::Sender<bool>,
     /// When the daemon started.
     pub started: Instant,
+    settings: RwLock<Arc<Settings>>,
+    config_error: Mutex<Option<String>>,
     latest: RwLock<Option<Arc<Latest>>>,
     sessions: Mutex<HashMap<SessionKey, Holder>>,
 }
@@ -83,19 +97,56 @@ impl Shared {
     /// Fresh state with an empty ledger and no sample yet.
     pub fn new(config: Config, token: String, pool: DbPool) -> Self {
         let ledger = Ledger::new(LedgerSettings::from_config(&config));
-        let classifier = Classifier::new(&config.classifier);
         Self {
-            config,
             token,
-            classifier,
             pool,
             ledger: AsyncMutex::new(ledger),
             changes: watch::Sender::new(0),
             shutdown: watch::Sender::new(false),
             started: Instant::now(),
+            settings: RwLock::new(Arc::new(Settings::new(config))),
+            config_error: Mutex::new(None),
             latest: RwLock::new(None),
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The configuration in effect. Hold the returned value for one request, so it sees one
+    /// consistent config even when a reload lands meanwhile.
+    pub fn settings(&self) -> Arc<Settings> {
+        self.settings
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Puts `config` into effect for later requests and the ledger, and clears a reported
+    /// config error. Leases keep the profiles they reserved.
+    pub async fn apply_config(&self, config: Config) {
+        let mut ledger = self.ledger.lock().await;
+        ledger.set_settings(LedgerSettings::from_config(&config));
+        *self
+            .settings
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(Settings::new(config));
+        drop(ledger);
+        self.set_config_error(None);
+    }
+
+    /// Why the last config change was rejected, if it was.
+    pub fn config_error(&self) -> Option<String> {
+        self.config_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records or clears the reason the config file was rejected.
+    pub fn set_config_error(&self, error: Option<String>) {
+        *self
+            .config_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = error;
     }
 
     /// The most recent sample, if one has arrived.
@@ -109,6 +160,11 @@ impl Shared {
     /// Replaces the most recent sample.
     pub fn set_latest(&self, latest: Latest) {
         *self.latest.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(latest));
+    }
+
+    /// The heartbeat TTL in effect.
+    pub fn heartbeat_ttl(&self) -> Duration {
+        Duration::from_secs(self.settings().config.leases.heartbeat_ttl_secs)
     }
 
     /// Adds or refreshes a session.

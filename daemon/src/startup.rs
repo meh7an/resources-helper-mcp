@@ -10,6 +10,8 @@ use std::{
 
 use anyhow::{Context, anyhow, bail};
 
+use crate::logfile::{KEPT_LOG_FILES, MAX_LOG_BYTES, RotatingFile};
+
 const TOKEN_BYTES: usize = 32;
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
@@ -75,19 +77,16 @@ pub fn load_or_create_token(path: &Path) -> anyhow::Result<String> {
     Ok(token)
 }
 
-/// Sends `tracing` output at INFO and above to `rhd.log` in `log_dir`.
+/// Sends `tracing` output at INFO and above to `rhd.log` in `log_dir`, which rotates at
+/// [`MAX_LOG_BYTES`] and keeps [`KEPT_LOG_FILES`] files.
 ///
 /// # Errors
 ///
 /// Fails when the log file cannot be opened or a global subscriber is already set.
 pub fn init_logging(log_dir: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(log_dir).with_context(|| format!("creating {}", log_dir.display()))?;
-    let path = log_dir.join("rhd.log");
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let file = RotatingFile::open(log_dir, "rhd", MAX_LOG_BYTES, KEPT_LOG_FILES)
+        .with_context(|| format!("opening rhd.log in {}", log_dir.display()))?;
     tracing_subscriber::fmt()
         .with_writer(Mutex::new(file))
         .with_ansi(false)

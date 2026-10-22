@@ -5,7 +5,7 @@ use clap::Parser;
 use rh_core::sampler::Sampler;
 use rh_sampler::SystemSampler;
 use rh_shared::{config::Config, paths::Paths};
-use rhd::{DaemonOptions, db, startup};
+use rhd::{DaemonOptions, Maintenance, db, startup};
 use tokio::net::TcpListener;
 
 /// Resource coordinator daemon: samples system usage and arbitrates heavy-job leases.
@@ -22,12 +22,28 @@ async fn main() -> anyhow::Result<()> {
     let _lock = startup::InstanceLock::acquire(&paths.lock_file())?;
     startup::init_logging(&paths.log_dir())?;
 
-    let config = Config::load(&paths.config_file())?;
+    // A detached rhd has no console, so the log is the only place a failure shows up.
+    let result = run(&paths).await;
+    if let Err(error) = &result {
+        tracing::error!("daemon failed: {error:#}");
+    }
+    result
+}
+
+async fn run(paths: &Paths) -> anyhow::Result<()> {
+    let config_file = paths.config_file();
+    let config = Config::load(&config_file)?;
     let token = startup::load_or_create_token(&paths.token_file())?;
     let pool = db::open_pool(&paths.database_file())?;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.daemon.port))
         .await
-        .with_context(|| format!("binding 127.0.0.1:{}", config.daemon.port))?;
+        .with_context(|| {
+            format!(
+                "binding 127.0.0.1:{}; another program may use the port (set daemon.port in {})",
+                config.daemon.port,
+                config_file.display()
+            )
+        })?;
 
     let options = DaemonOptions {
         config,
@@ -35,12 +51,9 @@ async fn main() -> anyhow::Result<()> {
         pool,
         sampler: Box::new(|| Ok(Box::new(SystemSampler::new()?) as Box<dyn Sampler>)),
         sample_interval: Duration::from_secs(1),
+        maintenance: Maintenance::standard(config_file),
     };
-    let result = rhd::serve(listener, options, shutdown_signal()).await;
-    if let Err(error) = &result {
-        tracing::error!("daemon failed: {error:#}");
-    }
-    result
+    rhd::serve(listener, options, shutdown_signal()).await
 }
 
 async fn shutdown_signal() {

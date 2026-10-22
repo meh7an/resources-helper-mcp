@@ -2,13 +2,15 @@
 //! whose machine state each test controls.
 
 use std::{
+    fs,
     future::Future,
+    path::PathBuf,
     process,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use diesel::sqlite::SqliteConnection;
+use diesel::{Connection, sqlite::SqliteConnection};
 use reqwest::{RequestBuilder, Response, StatusCode};
 use rh_core::sampler::{RawProcess, RawSample, Sampler};
 use rh_shared::{
@@ -24,7 +26,7 @@ use rh_shared::{
     },
 };
 use rhd::{
-    DaemonOptions,
+    DaemonOptions, Maintenance,
     db::{
         open_pool,
         repo::{self, LeaseDraft},
@@ -133,12 +135,24 @@ impl Daemon {
     /// Starts a daemon on `config` after `prepare` has run against its fresh database.
     async fn start_with(config: Config, prepare: impl FnOnce(&mut SqliteConnection)) -> Self {
         let dir = TempDir::new().unwrap();
-        let pool = open_pool(&dir.path().join("rh.db")).unwrap();
-        prepare(&mut pool.get().unwrap());
+        prepare(&mut open_pool(&database(&dir)).unwrap().get().unwrap());
+        Self::serve_in(dir, config, Arc::new(Mutex::new(idle_machine()))).await
+    }
 
+    /// Stops the daemon gracefully and starts a new one on the same database, config file,
+    /// and machine.
+    async fn restart(mut self) -> Self {
+        self.stop_server().await;
+        let Self {
+            machine, _dir: dir, ..
+        } = self;
+        Self::serve_in(dir, Config::default(), machine).await
+    }
+
+    async fn serve_in(dir: TempDir, config: Config, machine: Arc<Mutex<RawSample>>) -> Self {
+        let pool = open_pool(&database(&dir)).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let machine = Arc::new(Mutex::new(idle_machine()));
         let sampled = machine.clone();
         let options = DaemonOptions {
             config,
@@ -146,6 +160,11 @@ impl Daemon {
             pool,
             sampler: Box::new(move || Ok(Box::new(FakeSampler(sampled)) as Box<dyn Sampler>)),
             sample_interval: Duration::from_millis(20),
+            maintenance: Maintenance {
+                config_path: Some(dir.path().join("config.toml")),
+                config_poll: Duration::from_millis(20),
+                prune_every: Duration::from_secs(3_600),
+            },
         };
         let (stop, stopped) = oneshot::channel::<()>();
         let server = tokio::spawn(rhd::serve(listener, options, async {
@@ -259,7 +278,28 @@ impl Daemon {
         response.json::<LeasesResponse>().await.unwrap().leases
     }
 
+    /// A connection to the daemon's database, for checks the API does not expose.
+    fn db(&self) -> SqliteConnection {
+        SqliteConnection::establish(&database(&self._dir).to_string_lossy()).unwrap()
+    }
+
+    fn write_config(&self, text: &str) {
+        fs::write(self._dir.path().join("config.toml"), text).unwrap();
+    }
+
+    async fn health(&self) -> HealthResponse {
+        send(self.client.get(self.url("/health")))
+            .await
+            .json()
+            .await
+            .unwrap()
+    }
+
     async fn stop(mut self) {
+        self.stop_server().await;
+    }
+
+    async fn stop_server(&mut self) {
         if let Some(stop) = self.stop.take() {
             stop.send(()).unwrap();
         }
@@ -267,6 +307,10 @@ impl Daemon {
             server.await.unwrap().unwrap();
         }
     }
+}
+
+fn database(dir: &TempDir) -> PathBuf {
+    dir.path().join("rh.db")
 }
 
 #[tokio::test]
@@ -506,35 +550,161 @@ async fn test_can_fit_reports_the_shortfall() {
     daemon.stop().await;
 }
 
+/// Stores an active one-core lease of `holder` that a previous run granted at `at_ms`.
+fn stored_active_lease(conn: &mut SqliteConnection, holder: Holder, at_ms: i64) -> LeaseId {
+    let draft = LeaseDraft {
+        holder,
+        kind: LeaseKind::Normal,
+        class: None,
+        profile: JobProfile {
+            cores: 1.0,
+            ram_mb: 100,
+            gpu_pct: 0.0,
+            vram_mb: 0,
+            est_secs: 10,
+        },
+        label: "old build".into(),
+        cwd: String::new(),
+        requested_at_ms: at_ms,
+        expires_at_ms: at_ms + 1,
+    };
+    let lease = repo::insert_lease(conn, &draft).unwrap();
+    repo::transition_lease(conn, lease.id, LeaseState::Active, at_ms, "granted").unwrap();
+    lease.id
+}
+
 #[tokio::test]
-async fn test_leases_left_from_a_previous_run_expire_on_startup() {
-    let mut leftover = None;
+async fn test_leases_left_from_a_previous_run_are_restored_and_dead_holders_expire() {
+    let mut ids = None;
     let daemon = Daemon::start_with(Config::default(), |conn| {
-        let draft = LeaseDraft {
-            holder: alice(),
-            kind: LeaseKind::Normal,
-            class: None,
-            profile: JobProfile {
-                cores: 1.0,
-                ram_mb: 100,
-                gpu_pct: 0.0,
-                vram_mb: 0,
-                est_secs: 10,
-            },
-            label: "old build".into(),
-            cwd: String::new(),
-            requested_at_ms: 1,
-            expires_at_ms: 2,
-        };
-        let lease = repo::insert_lease(conn, &draft).unwrap();
-        repo::transition_lease(conn, lease.id, LeaseState::Active, 1, "granted").unwrap();
-        leftover = Some(lease.id);
+        let live = stored_active_lease(conn, alice(), 1);
+        let dead = stored_active_lease(conn, holder("ghost", 9_999, 1), 1);
+        ids = Some((live, dead));
+    })
+    .await;
+    let (live, dead) = ids.unwrap();
+
+    // The stored deadline passed long ago; the restore gave the live holder a fresh one.
+    assert_eq!(
+        daemon.heartbeat_state(live, "alice").await,
+        LeaseState::Active
+    );
+    let leases = daemon.leases("").await;
+    assert_eq!(leases[1].id, dead);
+    assert_eq!(leases[1].state, LeaseState::Expired);
+    let mut conn = daemon.db();
+    let reasons: Vec<String> = [live, dead]
+        .map(|id| {
+            repo::lease_events(&mut conn, id)
+                .unwrap()
+                .pop()
+                .unwrap()
+                .reason
+        })
+        .into();
+    assert_eq!(
+        reasons,
+        ["restored after a daemon restart", "holder process exited"]
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_restart_keeps_active_and_queued_leases_in_their_order() {
+    let daemon = Daemon::start().await;
+    let first = daemon.acquire_build(alice(), 0).await.lease;
+    let second = daemon.acquire_build(bob(), 0).await.lease;
+    assert_eq!(second.state, LeaseState::Queued);
+
+    let daemon = daemon.restart().await;
+    let states: Vec<(LeaseId, LeaseState)> = daemon
+        .leases("")
+        .await
+        .iter()
+        .map(|lease| (lease.id, lease.state))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            (first.id, LeaseState::Active),
+            (second.id, LeaseState::Queued)
+        ]
+    );
+    // The queued lease still waits for the restored active one, then starts when it ends.
+    let waiting = daemon.wait(second.id, "bob", 0).await;
+    let waiting: AcquireResponse = waiting.json().await.unwrap();
+    assert_eq!(waiting.lease.state, LeaseState::Queued);
+    let released = daemon.release_response(first.id, "alice").await;
+    assert_eq!(released.lease.state, LeaseState::Released);
+    assert_eq!(
+        daemon.heartbeat_state(second.id, "bob").await,
+        LeaseState::Active
+    );
+    // The run spanned the restart, so it left no history.
+    let history: HistoryResponse = daemon.get("/history").await.json().await.unwrap();
+    assert!(history.jobs.is_empty(), "{history:?}");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_startup_prunes_leases_past_their_retention() {
+    let day_ms = 86_400_000;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut ids = None;
+    let daemon = Daemon::start_with(Config::default(), |conn| {
+        let old = stored_active_lease(conn, alice(), now - 40 * day_ms);
+        repo::transition_lease(conn, old, LeaseState::Released, now - 40 * day_ms, "done").unwrap();
+        let recent = stored_active_lease(conn, alice(), now - day_ms);
+        repo::transition_lease(conn, recent, LeaseState::Released, now - day_ms, "done").unwrap();
+        ids = Some((old, recent));
+    })
+    .await;
+    let (old, recent) = ids.unwrap();
+
+    eventually("the old lease to be pruned", || async {
+        daemon.leases("").await.iter().all(|lease| lease.id != old)
+    })
+    .await;
+    assert_eq!(daemon.leases("").await[0].id, recent);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_config_change_takes_effect_and_a_rejected_one_is_reported() {
+    let daemon = Daemon::start().await;
+    daemon.write_config("[classes.cpu_heavy]\ncores = 2\n");
+    eventually("the new class profile", || async {
+        let acquired = daemon.acquire_build(alice(), 0).await.lease;
+        daemon.release(acquired.id, "alice").await;
+        acquired.profile.cores == 2.0
     })
     .await;
 
-    let leases = daemon.leases("").await;
-    assert_eq!(leases[0].id, leftover.unwrap());
-    assert_eq!(leases[0].state, LeaseState::Expired);
+    daemon.write_config("[classes.cpu_heavy]\ncores = 2\n[leases]\nheartbeat_ttl_secs = 0\n");
+    eventually("the rejection in /health", || async {
+        daemon
+            .health()
+            .await
+            .config_error
+            .is_some_and(|error| error.contains("leases.heartbeat_ttl_secs"))
+    })
+    .await;
+    let kept = daemon.acquire_build(alice(), 0).await.lease;
+    assert_eq!(kept.profile.cores, 2.0);
+    daemon.release(kept.id, "alice").await;
+
+    daemon.write_config("[classes.cpu_heavy]\ncores = 3\n");
+    eventually("the fixed config", || async {
+        daemon.health().await.config_error.is_none()
+    })
+    .await;
+    assert_eq!(
+        daemon.acquire_build(alice(), 0).await.lease.profile.cores,
+        3.0
+    );
     daemon.stop().await;
 }
 

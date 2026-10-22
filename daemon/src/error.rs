@@ -10,7 +10,10 @@ use rh_core::ledger::LedgerError;
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     /// The bearer token is missing or wrong.
-    #[error("missing or invalid bearer token")]
+    #[error(
+        "missing or invalid bearer token; clients read it from the token file in \
+         %USERPROFILE%\\.resources-helper"
+    )]
     Unauthorized,
     /// The lease or resource does not exist.
     #[error("{0}")]
@@ -22,7 +25,7 @@ pub enum AppError {
     #[error("{0}")]
     Validation(String),
     /// No machine sample has arrived yet.
-    #[error("no snapshot yet; the sampler is starting")]
+    #[error("rhd has just started and has no machine sample yet; retry in a second")]
     Unavailable,
     /// Anything else; logged, never shown to the client.
     #[error(transparent)]
@@ -49,7 +52,9 @@ impl IntoResponse for AppError {
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(error) => {
                 tracing::error!("request failed: {error:#}");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+                let message = "internal error; the details are in \
+                               %USERPROFILE%\\.resources-helper\\logs\\rhd.log";
+                return (StatusCode::INTERNAL_SERVER_ERROR, message).into_response();
             }
         };
         (status, self.to_string()).into_response()

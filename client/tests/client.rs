@@ -17,7 +17,7 @@ use rh_shared::{
     config::Config,
     types::{Holder, JobClass, LeaseKind, LeaseState, MemStats, ResourceUsage, SessionKey},
 };
-use rhd::{DaemonOptions, db::open_pool};
+use rhd::{DaemonOptions, Maintenance, db::open_pool};
 use tempfile::TempDir;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
@@ -110,6 +110,7 @@ impl Daemon {
             pool,
             sampler: Box::new(move || Ok(Box::new(FakeSampler(sampled)) as Box<dyn Sampler>)),
             sample_interval: Duration::from_millis(20),
+            maintenance: Maintenance::default(),
         };
         let (stop, stopped) = oneshot::channel::<()>();
         let server = tokio::spawn(async move {
@@ -259,6 +260,46 @@ async fn test_client_reads_token_from_file() {
     let client = Client::new(options(daemon.addr, TokenSource::File(path))).unwrap();
     assert!(client.snapshot().await.is_ok());
     daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_client_rereads_a_replaced_token_file_after_a_401() {
+    let daemon = Daemon::start().await;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("token");
+    std::fs::write(&path, "stale").unwrap();
+    let client = Client::new(options(daemon.addr, TokenSource::File(path.clone()))).unwrap();
+    let error = client.snapshot().await.unwrap_err();
+    assert_eq!(error.status(), Some(401));
+    assert!(error.to_string().contains("token file"), "{error}");
+
+    std::fs::write(&path, TOKEN).unwrap();
+    assert!(client.snapshot().await.is_ok());
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_client_never_resends_a_request_the_daemon_dropped() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let dropper = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        }
+    });
+    let mut options = options(addr, TokenSource::Fixed(TOKEN.into()));
+    // Sending the acquire again would start this and fail with `Spawn` instead.
+    options.spawn = Some(SpawnOptions {
+        daemon_exe: PathBuf::from("Z:\\no\\such\\rhd.exe"),
+        ready_timeout: Duration::from_millis(200),
+    });
+    let client = Client::new(options).unwrap();
+
+    let error = client.acquire(&build_request(0)).await.unwrap_err();
+    assert!(matches!(error, ClientError::Interrupted { .. }), "{error}");
+    assert!(error.is_unreachable() && !error.is_unsent());
+    dropper.abort();
 }
 
 #[tokio::test]
