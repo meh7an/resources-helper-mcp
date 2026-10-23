@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- M0.2 spike only: placeholder flyout content and diagnostics. M4.2 deletes the Spike folder. -->
+<UserControl
+  x:Class="ResourcesHelper.Tray.Spike.SpikeFlyoutContent"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <UserControl.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="SpikeEdgeBrush" Color="#17000000" />
+          <SolidColorBrush x:Key="SpikeCardBrush" Color="#B8FFFFFF" />
+          <SolidColorBrush x:Key="SpikeCardBorderBrush" Color="#24000000" />
+          <SolidColorBrush x:Key="SpikeTextSecondaryBrush" Color="#5C5C5C" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="SpikeEdgeBrush" Color="#14FFFFFF" />
+          <SolidColorBrush x:Key="SpikeCardBrush" Color="#0EFFFFFF" />
+          <SolidColorBrush x:Key="SpikeCardBorderBrush" Color="#66000000" />
+          <SolidColorBrush x:Key="SpikeTextSecondaryBrush" Color="#C5C5C5" />
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+      <Style x:Key="SpikeIconToggle" TargetType="ToggleButton">
+        <Setter Property="Width" Value="32" />
+        <Setter Property="Height" Value="32" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="CornerRadius" Value="4" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+      </Style>
+    </ResourceDictionary>
+  </UserControl.Resources>
+
+  <Border
+    BorderBrush="{ThemeResource SpikeEdgeBrush}"
+    BorderThickness="1"
+    CornerRadius="8">
+    <Grid>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="*" />
+      </Grid.RowDefinitions>
+
+      <!-- Header: empty space is the drag handle while pinned. -->
+      <Grid
+        x:Name="Header"
+        Padding="14,8,8,6"
+        Background="Transparent"
+        SizeChanged="OnHeaderSizeChanged">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <FontIcon Glyph="&#xE9D9;" FontSize="16" VerticalAlignment="Center" />
+        <TextBlock
+          Grid.Column="1"
+          Margin="10,0,10,0"
+          VerticalAlignment="Center"
+          FontFamily="Segoe UI Variable Display"
+          FontSize="14"
+          LineHeight="20"
+          FontWeight="SemiBold"
+          Text="Flyout window spike"
+          TextTrimming="CharacterEllipsis" />
+        <ToggleButton
+          x:Name="PinButton"
+          Grid.Column="2"
+          Style="{StaticResource SpikeIconToggle}"
+          Visibility="Collapsed"
+          ToolTipService.ToolTip="Pin"
+          AutomationProperties.Name="Pin"
+          Click="OnPinClick">
+          <FontIcon x:Name="PinIcon" Glyph="&#xE718;" FontSize="16" />
+        </ToggleButton>
+        <ToggleButton
+          x:Name="StayOpenButton"
+          Grid.Column="3"
+          Style="{StaticResource SpikeIconToggle}"
+          ToolTipService.ToolTip="Stay open"
+          AutomationProperties.Name="Stay open"
+          Click="OnStayOpenClick">
+          <FontIcon x:Name="StayOpenIcon" Glyph="&#xE785;" FontSize="16" />
+        </ToggleButton>
+        <Button
+          Grid.Column="4"
+          Width="32"
+          Height="32"
+          Margin="4,0,0,0"
+          Padding="0"
+          CornerRadius="4"
+          BorderThickness="0"
+          Background="Transparent"
+          ToolTipService.ToolTip="More options"
+          AutomationProperties.Name="More options">
+          <FontIcon Glyph="&#xE712;" FontSize="16" />
+          <Button.Flyout>
+            <MenuFlyout Placement="BottomEdgeAlignedRight" Opened="OnMenuOpened" Closed="OnMenuClosed">
+              <MenuFlyoutSubItem Text="Meters">
+                <ToggleMenuFlyoutItem Text="CPU" IsChecked="True" />
+                <ToggleMenuFlyoutItem Text="RAM" IsChecked="True" />
+              </MenuFlyoutSubItem>
+              <MenuFlyoutSubItem Text="Notifications">
+                <ToggleMenuFlyoutItem Text="Service stopped" IsChecked="True" />
+              </MenuFlyoutSubItem>
+              <MenuFlyoutSeparator />
+              <MenuFlyoutItem Text="Quit spike" Click="OnQuitClick" />
+            </MenuFlyout>
+          </Button.Flyout>
+        </Button>
+      </Grid>
+
+      <ScrollViewer Grid.Row="1" Padding="8,0,8,6">
+        <StackPanel Spacing="6">
+          <Border
+            Padding="12,8"
+            Background="{ThemeResource SpikeCardBrush}"
+            BorderBrush="{ThemeResource SpikeCardBorderBrush}"
+            BorderThickness="1"
+            CornerRadius="6">
+            <TextBlock
+              x:Name="DiagnosticsText"
+              FontFamily="Cascadia Mono"
+              FontSize="11"
+              TextWrapping="Wrap" />
+          </Border>
+          <Border
+            Padding="12,4,12,8"
+            Background="{ThemeResource SpikeCardBrush}"
+            BorderBrush="{ThemeResource SpikeCardBorderBrush}"
+            BorderThickness="1"
+            CornerRadius="6">
+            <StackPanel>
+              <ToggleSwitch
+                x:Name="KeepActiveSwitch"
+                Header="Keep acrylic when inactive"
+                Toggled="OnKeepActiveToggled" />
+              <TextBlock x:Name="TintLabel" FontSize="12" />
+              <Slider
+                x:Name="TintSlider"
+                Minimum="0"
+                Maximum="1"
+                StepFrequency="0.01"
+                ValueChanged="OnTintChanged" />
+              <TextBlock x:Name="LuminosityLabel" FontSize="12" />
+              <Slider
+                x:Name="LuminositySlider"
+                Minimum="0"
+                Maximum="1"
+                StepFrequency="0.01"
+                ValueChanged="OnLuminosityChanged" />
+            </StackPanel>
+          </Border>
+          <Border
+            Padding="12,8"
+            Background="{ThemeResource SpikeCardBrush}"
+            BorderBrush="{ThemeResource SpikeCardBorderBrush}"
+            BorderThickness="1"
+            CornerRadius="6">
+            <TextBlock
+              FontSize="12"
+              LineHeight="16"
+              Foreground="{ThemeResource SpikeTextSecondaryBrush}"
+              TextWrapping="Wrap"
+              Text="Launch rh-tray.exe again to toggle. Click outside, press Win or Esc to dismiss. Stay open turns dismiss off; Pin makes the flyout topmost and lets you drag it by the header." />
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+    </Grid>
+  </Border>
+</UserControl>
