@@ -269,19 +269,60 @@ mod tests {
         assert!(raw.memory.commit_used_mb <= raw.memory.commit_limit_mb);
     }
 
-    /// A PowerShell loop that keeps one core busy for `millis`.
-    fn busy_child(millis: u32) -> process::Child {
-        process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "$t = [Environment]::TickCount; \
-                     while ([Environment]::TickCount - $t -lt {millis}) {{}}"
-                ),
-            ])
+    const BURN_MS_VAR: &str = "RH_SAMPLER_TEST_BURN_MS";
+    /// CPU time a child must have used before it counts as busy; start-up alone stays below.
+    const BUSY_CPU_MS: u64 = 100;
+
+    /// Not a test: the child process of [`busy_child`]. Keeps one core busy for
+    /// `RH_SAMPLER_TEST_BURN_MS` milliseconds and does nothing without it.
+    #[test]
+    #[ignore = "helper process for the CPU sampling tests"]
+    fn burn_cpu_helper() {
+        let Some(millis) = std::env::var(BURN_MS_VAR)
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+        else {
+            return;
+        };
+        let end = Instant::now() + Duration::from_millis(millis);
+        while Instant::now() < end {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// This test binary running [`burn_cpu_helper`] for `millis`. Returns only once the child
+    /// is burning, because start-up on a loaded CI machine can outlast a fixed sleep.
+    fn busy_child(millis: u64) -> process::Child {
+        let child = process::Command::new(std::env::current_exe().unwrap())
+            .args(["tests::burn_cpu_helper", "--exact", "--ignored"])
+            .env(BURN_MS_VAR, millis.to_string())
+            .stdout(process::Stdio::null())
             .spawn()
-            .unwrap()
+            .unwrap();
+        wait_until_busy(child.id());
+        child
+    }
+
+    fn wait_until_busy(pid: u32) {
+        let pid = Pid::from_u32(pid);
+        let mut system = System::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                true,
+                ProcessRefreshKind::nothing().with_cpu(),
+            );
+            let used = system.process(pid).map_or(0, |p| p.accumulated_cpu_time());
+            if used >= BUSY_CPU_MS {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the burner used only {used} ms of CPU in 30 s"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     fn sampled_cores(raw: &RawSample, pid: u32) -> f32 {
