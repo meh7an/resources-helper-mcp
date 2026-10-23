@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ResourcesHelper.Tray.Core/ResourcesHelper.Tray.Core.csproj" />
+    <Project Path="src/ResourcesHelper.Tray/ResourcesHelper.Tray.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ResourcesHelper.Tray.Core.Tests/ResourcesHelper.Tray.Core.Tests.csproj" />
+  </Folder>
+</Solution>
