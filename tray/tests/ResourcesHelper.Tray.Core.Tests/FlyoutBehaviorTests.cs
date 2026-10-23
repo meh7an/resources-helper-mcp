@@ -61,6 +61,25 @@ public sealed class FlyoutBehaviorTests
     }
 
     [TestMethod]
+    public void OpenIgnoresTheDebounce()
+    {
+        var behavior = Opened();
+        _ = behavior.Deactivated(1000);
+
+        Assert.IsTrue(behavior.Open());
+        Assert.IsTrue(behavior.IsOpen);
+    }
+
+    [TestMethod]
+    public void OpenWhileOpenDoesNothing()
+    {
+        var behavior = Opened();
+
+        Assert.IsFalse(behavior.Open());
+        Assert.IsTrue(behavior.IsOpen);
+    }
+
+    [TestMethod]
     public void EscapeDismisses()
     {
         var behavior = Opened();

@@ -22,6 +22,8 @@
 
   <ItemGroup>
     <Content Include="Assets\AppIcon.ico" />
+    <!-- Handoff tray icons; LoadImage picks the frame for the DPI straight from these files. -->
+    <Content Include="Assets\Tray\*.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
@@ -35,6 +37,35 @@
   <ItemGroup>
     <ProjectReference Include="..\ResourcesHelper.Tray.Core\ResourcesHelper.Tray.Core.csproj" />
   </ItemGroup>
+
+  <!--
+    Windows App SDK 2.5.1 bug (microsoft/WindowsAppSDK#6774): a self-contained build lacks
+    Microsoft.WindowsAppRuntime.Insights.Resource.dll, so AppNotificationManager.Register throws
+    0x8007007E. The DLL ships only inside the runtime MSIX; copy it next to the exe. Delete this
+    block once a release with the fix ships; the Error fires when the SDK version moves.
+  -->
+  <PropertyGroup>
+    <InsightsResourceDll>Microsoft.WindowsAppRuntime.Insights.Resource.dll</InsightsResourceDll>
+    <InsightsResourceMsix>$(NuGetPackageRoot)microsoft.windowsappsdk.runtime\2.5.1\tools\MSIX\win10-x64\Microsoft.WindowsAppRuntime.2.msix</InsightsResourceMsix>
+  </PropertyGroup>
+
+  <Target Name="AddInsightsResource" BeforeTargets="AssignTargetPaths">
+    <Error
+      Condition="!Exists('$(InsightsResourceMsix)')"
+      Text="$(InsightsResourceMsix) is missing. If the Windows App SDK was bumped, check whether #6774 is fixed and drop this workaround, or update the path." />
+    <Unzip
+      SourceFiles="$(InsightsResourceMsix)"
+      DestinationFolder="$(IntermediateOutputPath)insights"
+      Include="$(InsightsResourceDll)"
+      SkipUnchangedFiles="true" />
+    <ItemGroup>
+      <None
+        Include="$(IntermediateOutputPath)insights\$(InsightsResourceDll)"
+        Link="$(InsightsResourceDll)"
+        CopyToOutputDirectory="PreserveNewest"
+        CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
 
   <!-- Publish Properties -->
   <PropertyGroup>

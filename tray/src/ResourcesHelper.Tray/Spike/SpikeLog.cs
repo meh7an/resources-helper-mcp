@@ -18,4 +18,12 @@ internal static class SpikeLog
         Debug.WriteLine(line);
         File.AppendAllText(LogPath, line + Environment.NewLine);
     }
+
+    /// <summary>
+    /// Opens the log in the default text editor.
+    /// </summary>
+    public static void Open()
+    {
+        using var editor = Process.Start(new ProcessStartInfo(LogPath) { UseShellExecute = true });
+    }
 }

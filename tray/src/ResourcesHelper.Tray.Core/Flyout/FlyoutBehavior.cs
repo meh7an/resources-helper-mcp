@@ -33,7 +33,7 @@ public sealed class FlyoutBehavior(TimeSpan toggleDebounce)
     public bool MenuOpen { get; set; }
 
     /// <summary>
-    /// A tray click (or a second launch) toggles the flyout. The click itself deactivates the
+    /// A tray click toggles the flyout. The click itself deactivates the
     /// flyout first, so a toggle right after a light dismiss is that same click and must not
     /// reopen it.
     /// </summary>
@@ -53,6 +53,23 @@ public sealed class FlyoutBehavior(TimeSpan toggleDebounce)
 
         IsOpen = true;
         return ToggleResult.Show;
+    }
+
+    /// <summary>
+    /// A menu command, a toast or a second launch opens the flyout. None of them is the tray
+    /// click that may just have dismissed it, so the debounce doesn't apply.
+    /// </summary>
+    /// <returns>True when the flyout should show.</returns>
+    public bool Open()
+    {
+        if (IsOpen)
+        {
+            return false;
+        }
+
+        IsOpen = true;
+        _lightDismissedAtMs = null;
+        return true;
     }
 
     /// <summary>

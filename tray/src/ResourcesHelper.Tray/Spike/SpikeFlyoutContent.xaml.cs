@@ -65,7 +65,7 @@ public sealed partial class SpikeFlyoutContent : UserControl
 
     private void OnMenuClosed(object? sender, object e) => _window.SetMenuOpen(false);
 
-    private void OnQuitClick(object sender, RoutedEventArgs e) => Application.Current.Exit();
+    private void OnQuitClick(object sender, RoutedEventArgs e) => ((App)Application.Current).Quit();
 
     private void OnKeepActiveToggled(object sender, RoutedEventArgs e)
     {

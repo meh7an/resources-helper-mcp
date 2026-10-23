@@ -27,9 +27,9 @@ namespace ResourcesHelper.Tray.Flyout;
 /// </summary>
 public sealed partial class FlyoutWindow : Window
 {
-    // A second launch needs several hundred ms to reach the running instance; M0.3 sets the
-    // value for a real tray click.
-    private static readonly TimeSpan ToggleDebounce = TimeSpan.FromMilliseconds(500);
+    // A click on the tray icon deactivates the flyout 16-141 ms before its NIN_SELECT arrives
+    // (measured in M0.3); about twice that still lets a deliberate reopen through.
+    private static readonly TimeSpan ToggleDebounce = TimeSpan.FromMilliseconds(300);
     private static readonly TimeSpan OpenDuration = TimeSpan.FromMilliseconds(167);
     private static readonly TimeSpan CloseDuration = TimeSpan.FromMilliseconds(100);
     private const float OpenOffset = 12;
@@ -101,7 +101,7 @@ public sealed partial class FlyoutWindow : Window
     }
 
     /// <summary>
-    /// A tray click or a second launch.
+    /// A tray icon click.
     /// </summary>
     public void Toggle()
     {
@@ -120,6 +120,18 @@ public sealed partial class FlyoutWindow : Window
                 break;
             case ToggleResult.Ignore:
                 break;
+        }
+    }
+
+    /// <summary>
+    /// A menu command, a toast or a second launch: opens the flyout if it is closed.
+    /// </summary>
+    public void Open()
+    {
+        if (_behavior.Open())
+        {
+            Report("open");
+            Show();
         }
     }
 
