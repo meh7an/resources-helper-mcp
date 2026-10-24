@@ -50,11 +50,23 @@ impl ProcessTable {
     /// parent: Windows reuses PIDs and never updates a child's parent PID.
     pub fn children(&self, pid: u32) -> impl Iterator<Item = &ProcessNode> {
         let parent = self.get(pid);
+        parent
+            .into_iter()
+            .flat_map(move |parent| self.children_of(parent.pid, parent.start_time))
+    }
+
+    /// Direct children of the process `pid` that started at `start_time`, in no particular
+    /// order, whether or not that process is still running: a killed parent's children keep
+    /// its PID as their parent PID.
+    pub fn children_of(&self, pid: u32, start_time: u64) -> impl Iterator<Item = &ProcessNode> {
         self.nodes.values().filter(move |node| {
-            node.pid != pid
-                && node.parent_pid == Some(pid)
-                && parent.is_some_and(|parent| parent.start_time <= node.start_time)
+            node.pid != pid && node.parent_pid == Some(pid) && start_time <= node.start_time
         })
+    }
+
+    /// Every process, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = &ProcessNode> {
+        self.nodes.values()
     }
 }
 
@@ -141,6 +153,14 @@ mod tests {
     fn test_process_table_children_of_unknown_pid_are_empty() {
         let table = ProcessTable::new(&[process(2, Some(1), 30)]);
         assert!(child_pids(&table, 1).is_empty());
+    }
+
+    #[test]
+    fn test_process_table_children_of_a_dead_parent_are_found_by_start_time() {
+        let table = ProcessTable::new(&[process(2, Some(1), 30), process(3, Some(1), 5)]);
+        let mut pids: Vec<u32> = table.children_of(1, 20).map(|node| node.pid).collect();
+        pids.sort_unstable();
+        assert_eq!(pids, [2]);
     }
 
     #[test]

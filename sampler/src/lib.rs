@@ -8,10 +8,14 @@ mod drives;
 mod dxgi;
 mod exe;
 mod gpu;
+mod kill;
 mod pdh;
 mod process;
 
-pub use crate::process::current_ancestry;
+pub use crate::{
+    kill::{kill_tree, process_table},
+    process::current_ancestry,
+};
 
 use std::{
     collections::HashMap,
@@ -316,7 +320,7 @@ mod tests {
 
     /// This test binary running [`burn_cpu_helper`] for `millis`. Returns only once the child
     /// is burning, because start-up on a loaded CI machine can outlast a fixed sleep.
-    fn busy_child(millis: u64) -> process::Child {
+    pub(crate) fn busy_child(millis: u64) -> process::Child {
         let child = process::Command::new(std::env::current_exe().unwrap())
             .args(["tests::burn_cpu_helper", "--exact", "--ignored"])
             .env(BURN_MS_VAR, millis.to_string())

@@ -11,7 +11,9 @@
 use rh_shared::{
     api::{BenchmarkProgress, Verdict},
     config::Config,
-    types::{Holder, JobProfile, Lease, LeaseId, LeaseKind, LeaseState, SessionKey, Snapshot},
+    types::{
+        EndCause, Holder, JobProfile, Lease, LeaseId, LeaseKind, LeaseState, SessionKey, Snapshot,
+    },
 };
 
 use crate::{
@@ -242,15 +244,24 @@ impl Ledger {
         now_ms: i64,
     ) -> Result<Released, LedgerError> {
         let index = self.owned_index(id, session)?;
-        let mut lease = self.leases.remove(index);
-        lease.state = LeaseState::Released;
-        lease.ended_at_ms = Some(now_ms);
-        let run = self
-            .meters
-            .iter()
-            .position(|meter| meter.lease_id() == id)
-            .and_then(|index| self.meters.remove(index).finish());
-        Ok(Released { lease, run })
+        Ok(self.remove(index, LeaseState::Released, None, now_ms))
+    }
+
+    /// Ends a queued or active lease for `cause` and stops tracking it, whichever session
+    /// holds it: kills and removals come from the user, not from the holder. The lease ends
+    /// in [`EndCause::ended_state`] with `cause` recorded.
+    ///
+    /// # Errors
+    ///
+    /// [`LedgerError::NotFound`].
+    pub fn end(
+        &mut self,
+        id: LeaseId,
+        cause: EndCause,
+        now_ms: i64,
+    ) -> Result<Released, LedgerError> {
+        let index = self.index(id)?;
+        Ok(self.remove(index, cause.ended_state(), Some(cause), now_ms))
     }
 
     /// Expires leases whose holder died or whose heartbeat stopped, feeds `snapshot` to the
@@ -399,16 +410,39 @@ impl Ledger {
         })
     }
 
-    fn owned_index(&self, id: LeaseId, session: &SessionKey) -> Result<usize, LedgerError> {
-        let index = self
-            .leases
+    fn index(&self, id: LeaseId) -> Result<usize, LedgerError> {
+        self.leases
             .iter()
             .position(|lease| lease.id == id)
-            .ok_or(LedgerError::NotFound(id))?;
+            .ok_or(LedgerError::NotFound(id))
+    }
+
+    fn owned_index(&self, id: LeaseId, session: &SessionKey) -> Result<usize, LedgerError> {
+        let index = self.index(id)?;
         if &self.leases[index].holder.session != session {
             return Err(LedgerError::NotOwner(id));
         }
         Ok(index)
+    }
+
+    /// Stops tracking the lease at `index` and finishes its meter.
+    fn remove(
+        &mut self,
+        index: usize,
+        state: LeaseState,
+        cause: Option<EndCause>,
+        now_ms: i64,
+    ) -> Released {
+        let mut lease = self.leases.remove(index);
+        lease.state = state;
+        lease.end_cause = cause;
+        lease.ended_at_ms = Some(now_ms);
+        let run = self
+            .meters
+            .iter()
+            .position(|meter| meter.lease_id() == lease.id)
+            .and_then(|index| self.meters.remove(index).finish());
+        Released { lease, run }
     }
 
     fn reap(&mut self, now_ms: i64, liveness: &dyn ProcessLiveness) -> Vec<Transition> {
@@ -1049,6 +1083,38 @@ mod tests {
         assert_eq!(run.holder_peak.cores, 12.0);
         assert_eq!(run.holder_avg.cores, 8.0);
         assert!(!run.overlapped);
+    }
+
+    #[test]
+    fn test_end_kills_another_sessions_active_lease_and_keeps_its_run() {
+        let mut ledger = Ledger::new(settings());
+        enqueue(&mut ledger, 1, 8.0, 300, 0);
+        assert_eq!(tick_seconds(&mut ledger, 0, 0, 0.0), [1]);
+        let mut busy_sample = sample(1_000, 50.0);
+        busy_sample.sessions = vec![session_usage("s", 6.0)];
+        ledger.tick(1_000, &busy_sample, &alive());
+
+        let ended = ledger.end(LeaseId(1), EndCause::Killed, 2_000).unwrap();
+        assert_eq!(ended.lease.state, LeaseState::Expired);
+        assert_eq!(ended.lease.end_cause, Some(EndCause::Killed));
+        assert_eq!(ended.lease.ended_at_ms, Some(2_000));
+        assert_eq!(ended.run.unwrap().holder_peak.cores, 6.0);
+        assert!(ledger.leases().is_empty());
+    }
+
+    #[test]
+    fn test_end_removes_a_queued_lease_without_a_run() {
+        let mut ledger = Ledger::new(settings());
+        enqueue(&mut ledger, 1, 8.0, 300, 0);
+
+        let ended = ledger.end(LeaseId(1), EndCause::Removed, 500).unwrap();
+        assert_eq!(ended.lease.state, LeaseState::Expired);
+        assert_eq!(ended.lease.end_cause, Some(EndCause::Removed));
+        assert_eq!(ended.run, None);
+        assert_eq!(
+            ledger.end(LeaseId(1), EndCause::Removed, 600).unwrap_err(),
+            LedgerError::NotFound(LeaseId(1))
+        );
     }
 
     #[test]

@@ -4,8 +4,10 @@
 pub mod admission;
 pub mod ancestry;
 pub mod benchmark;
+pub mod binding;
 pub mod classifier;
 pub mod history;
+pub mod kill;
 pub mod ledger;
 pub mod meter;
 pub mod process;

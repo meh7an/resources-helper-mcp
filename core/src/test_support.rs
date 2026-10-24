@@ -3,6 +3,8 @@ use rh_shared::types::{
     MemStats, ResourceUsage, Rolling, SessionKey, SessionUsage, Snapshot,
 };
 
+use crate::sampler::RawProcess;
+
 pub(crate) const LOGICAL_CORES: u32 = 16;
 
 fn steady(value: f32) -> Rolling {
@@ -114,5 +116,22 @@ pub(crate) fn active_lease(id: i64, session: &str, profile: JobProfile) -> Lease
         state: LeaseState::Active,
         granted_at_ms: Some(0),
         ..queued_lease(id, session, profile, LeaseKind::Normal, 0)
+    }
+}
+
+/// A process named `name` with no load.
+pub(crate) fn raw_process(
+    pid: u32,
+    parent_pid: Option<u32>,
+    name: &str,
+    start_time: u64,
+) -> RawProcess {
+    RawProcess {
+        pid,
+        parent_pid,
+        name: name.into(),
+        exe: None,
+        start_time,
+        usage: ResourceUsage::default(),
     }
 }
