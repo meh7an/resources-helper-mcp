@@ -45,6 +45,7 @@ pub(crate) fn snapshot() -> Snapshot {
         processes: vec![ProcessUsage {
             pid: 7,
             name: "cargo.exe".into(),
+            exe: None,
             usage: ResourceUsage::default(),
         }],
     };
@@ -75,6 +76,7 @@ pub(crate) fn snapshot() -> Snapshot {
         }],
         sessions: vec![session("me", 2.0), session("them", 3.0)],
         unattributed: ResourceUsage::default(),
+        drives: Vec::new(),
     }
 }
 
@@ -195,6 +197,7 @@ pub(crate) fn lease(id: i64, holder: Holder, state: LeaseState) -> Lease {
         granted_at_ms: None,
         ended_at_ms: None,
         expires_at_ms: 60_000,
+        end_cause: None,
     }
 }
 

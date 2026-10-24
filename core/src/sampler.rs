@@ -193,6 +193,7 @@ impl SnapshotBuilder {
             gpus,
             sessions,
             unattributed,
+            drives: Vec::new(),
         }
     }
 }
@@ -239,6 +240,7 @@ pub fn attribute(
                 session.processes.push(ProcessUsage {
                     pid: process.pid,
                     name: process.name.clone(),
+                    exe: None,
                     usage: process.usage,
                 });
             }

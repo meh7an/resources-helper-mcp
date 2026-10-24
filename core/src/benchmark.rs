@@ -8,8 +8,6 @@ use std::collections::VecDeque;
 
 use rh_shared::types::Snapshot;
 
-use crate::admission;
-
 /// When a drained machine counts as quiet, with times in milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QuietLimits {
@@ -158,7 +156,7 @@ fn busiest_gpu_pct(snapshot: &Snapshot) -> f32 {
     snapshot
         .gpus
         .iter()
-        .map(|gpu| admission::busiest_engine_pct(&gpu.engines, |load| load.avg_1s))
+        .map(|gpu| gpu.engines.busiest(|load| load.avg_1s))
         .fold(0.0, f32::max)
 }
 

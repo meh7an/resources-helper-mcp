@@ -6,9 +6,7 @@
 
 use std::collections::HashSet;
 
-use rh_shared::types::{
-    GpuAdapter, GpuEngines, JobProfile, Lease, ResourceUsage, Rolling, Snapshot,
-};
+use rh_shared::types::{GpuAdapter, JobProfile, Lease, ResourceUsage, Snapshot};
 
 // Tolerance for float sums of reservations, so 8.0 cores fit in 8.0 cores of room.
 const EPSILON: f64 = 1e-6;
@@ -54,7 +52,7 @@ impl Room {
             vram_mb: None,
         };
         if let Some(gpu) = primary_adapter(&snapshot.gpus) {
-            let busiest = f64::from(busiest_engine_pct(&gpu.engines, |load| load.avg_10s));
+            let busiest = f64::from(gpu.engines.busiest(|load| load.avg_10s));
             room.gpu_pct = Some(100.0 * keep - background(busiest, f64::from(leased.gpu_pct)));
             room.vram_mb = gpu.dedicated_total_mb.map(|total_mb| {
                 total_mb as f64 * keep
@@ -141,19 +139,6 @@ pub fn primary_adapter(gpus: &[GpuAdapter]) -> Option<&GpuAdapter> {
             best
         }
     })
-}
-
-/// Load of the busiest engine group, read from the window `pick` selects.
-pub fn busiest_engine_pct(engines: &GpuEngines, pick: fn(&Rolling) -> f32) -> f32 {
-    [
-        engines.three_d_pct,
-        engines.compute_pct,
-        engines.copy_pct,
-        engines.video_pct,
-    ]
-    .iter()
-    .map(pick)
-    .fold(0.0, f32::max)
 }
 
 /// A reservation and when it is expected to end.

@@ -1,0 +1,1087 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UiState",
+  "description": "Response of `GET /ui/state`: everything the flyout shows, in one poll.",
+  "type": "object",
+  "properties": {
+    "active": {
+      "description": "Active leases, oldest grant first.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ActiveJob"
+      }
+    },
+    "first_session_at_ms": {
+      "description": "When a Claude session first registered with this install, or `None` when none ever\nhas, which shows the first-run card.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "generated_at_ms": {
+      "description": "When the state was built, in milliseconds since the Unix epoch. Elapsed and waited\ntimes are measured against it, so they do not depend on the tray app's clock.",
+      "type": "integer",
+      "format": "int64"
+    },
+    "meters": {
+      "description": "Machine meters for the Resources card.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Meters"
+        }
+      ]
+    },
+    "notices": {
+      "description": "Kills and removals, with whether Claude has been told yet.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Notice"
+      }
+    },
+    "queue": {
+      "description": "Queued leases, in queue order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/QueuedJob"
+      }
+    },
+    "recent": {
+      "description": "Recently finished jobs, newest first.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/RecentRun"
+      }
+    },
+    "service": {
+      "description": "The daemon itself.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/HealthResponse"
+        }
+      ]
+    },
+    "sessions": {
+      "description": "Every registered session, with or without leases.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/UiSession"
+      }
+    }
+  },
+  "required": [
+    "generated_at_ms",
+    "service",
+    "sessions",
+    "active",
+    "queue",
+    "meters",
+    "recent",
+    "notices"
+  ],
+  "definitions": {
+    "ActiveJob": {
+      "description": "An active lease and the process its command runs as.",
+      "type": "object",
+      "properties": {
+        "lease": {
+          "description": "The lease.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Lease"
+            }
+          ]
+        },
+        "process": {
+          "description": "The command's process, or `None` when the session has no process to show.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/JobProcess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "lease"
+      ]
+    },
+    "BenchmarkProgress": {
+      "description": "Where a waiting benchmark lease stands, so its holder can report progress.",
+      "oneOf": [
+        {
+          "description": "Other leases are still active; nothing new starts until they end.",
+          "type": "object",
+          "properties": {
+            "active_leases": {
+              "description": "Active leases left.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "phase": {
+              "type": "string",
+              "const": "draining"
+            }
+          },
+          "required": [
+            "phase",
+            "active_leases"
+          ]
+        },
+        {
+          "description": "The machine has drained and its background load is being averaged.",
+          "type": "object",
+          "properties": {
+            "cpu_avg_pct": {
+              "description": "Average total CPU load so far, in percent.",
+              "type": "number",
+              "format": "float"
+            },
+            "gpu_avg_pct": {
+              "description": "Average load of the busiest GPU engine so far, in percent.",
+              "type": "number",
+              "format": "float"
+            },
+            "measured_secs": {
+              "description": "Seconds averaged so far.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "needed_secs": {
+              "description": "Seconds the average must cover.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "phase": {
+              "type": "string",
+              "const": "measuring"
+            }
+          },
+          "required": [
+            "phase",
+            "measured_secs",
+            "needed_secs",
+            "cpu_avg_pct",
+            "gpu_avg_pct"
+          ]
+        },
+        {
+          "description": "The average is above the quiet limits. The lease is granted anyway, marked as not\nquiet, once `grant_anyway_in_secs` have passed.",
+          "type": "object",
+          "properties": {
+            "cpu_avg_pct": {
+              "description": "Average total CPU load over the quiet window, in percent.",
+              "type": "number",
+              "format": "float"
+            },
+            "cpu_limit_pct": {
+              "description": "CPU limit of a quiet machine.",
+              "type": "number",
+              "format": "float"
+            },
+            "gpu_avg_pct": {
+              "description": "Average load of the busiest GPU engine over the quiet window, in percent.",
+              "type": "number",
+              "format": "float"
+            },
+            "gpu_limit_pct": {
+              "description": "GPU limit of a quiet machine.",
+              "type": "number",
+              "format": "float"
+            },
+            "grant_anyway_in_secs": {
+              "description": "Seconds until the lease is granted without quiet.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "phase": {
+              "type": "string",
+              "const": "noisy"
+            }
+          },
+          "required": [
+            "phase",
+            "cpu_avg_pct",
+            "gpu_avg_pct",
+            "cpu_limit_pct",
+            "gpu_limit_pct",
+            "grant_anyway_in_secs"
+          ]
+        }
+      ]
+    },
+    "CpuMeter": {
+      "description": "Processor load.",
+      "type": "object",
+      "properties": {
+        "history_pct": {
+          "description": "Recent once-a-second loads for the sparkline, oldest first, at most 24.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          }
+        },
+        "logical_cores": {
+          "description": "Number of logical processors.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reserved_cores": {
+          "description": "Logical cores reserved by active leases.",
+          "type": "number",
+          "format": "float"
+        },
+        "usage_pct": {
+          "description": "Total load over the last second, as a percentage of all logical processors.",
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "logical_cores",
+        "usage_pct",
+        "history_pct",
+        "reserved_cores"
+      ]
+    },
+    "DriveUsage": {
+      "description": "Space and activity of one fixed drive.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Drive letter with its colon, for example `C:`.",
+          "type": "string"
+        },
+        "read_bytes_per_sec": {
+          "description": "Bytes read per second over the last second.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "total_mb": {
+          "description": "Capacity of the volume.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "used_mb": {
+          "description": "Space in use.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "write_bytes_per_sec": {
+          "description": "Bytes written per second over the last second.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "total_mb",
+        "used_mb",
+        "read_bytes_per_sec",
+        "write_bytes_per_sec"
+      ]
+    },
+    "EndCause": {
+      "description": "Why a lease ended.\n\nKept apart from [`LeaseState`], whose values are fixed by the database's CHECK constraints\nand by older `rh-mcp` builds that reject unknown states.",
+      "oneOf": [
+        {
+          "description": "Its holder released it.",
+          "type": "string",
+          "const": "released"
+        },
+        {
+          "description": "The daemon ended it because the heartbeat stopped or the holder died.",
+          "type": "string",
+          "const": "expired"
+        },
+        {
+          "description": "The user stopped the job and its process tree.",
+          "type": "string",
+          "const": "killed"
+        },
+        {
+          "description": "The user removed the request from the queue before it started.",
+          "type": "string",
+          "const": "removed"
+        }
+      ]
+    },
+    "GpuMeter": {
+      "description": "One GPU adapter.",
+      "type": "object",
+      "properties": {
+        "busiest_pct": {
+          "description": "Load of the busiest engine group over the last second, in percent.",
+          "type": "number",
+          "format": "float"
+        },
+        "name": {
+          "description": "Adapter name, for example `NVIDIA GeForce RTX 4070`.",
+          "type": "string"
+        },
+        "reserved_pct": {
+          "description": "Engine load reserved by active leases, in percent. Leases reserve on the adapter with\nthe most video memory only, so it is 0 on every other adapter.",
+          "type": "number",
+          "format": "float"
+        },
+        "reserved_vram_mb": {
+          "description": "Video memory reserved by active leases; 0 on every adapter but the reserving one.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vram_total_mb": {
+          "description": "Dedicated video memory installed, when the OS reports it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vram_used_mb": {
+          "description": "Dedicated video memory in use.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "busiest_pct",
+        "vram_used_mb",
+        "reserved_pct",
+        "reserved_vram_mb"
+      ]
+    },
+    "HealthResponse": {
+      "description": "Response of `GET /health`.",
+      "type": "object",
+      "properties": {
+        "config_error": {
+          "description": "Why the last change to `config.toml` was rejected; the daemon keeps the config it had\nuntil the file is fixed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pid": {
+          "description": "Daemon process ID.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "uptime_secs": {
+          "description": "Seconds since the daemon started.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "version": {
+          "description": "Daemon version, from its `Cargo.toml`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "pid",
+        "uptime_secs"
+      ]
+    },
+    "Holder": {
+      "description": "The process a session's leases live and die with.",
+      "type": "object",
+      "properties": {
+        "pid": {
+          "description": "PID of the session's `claude.exe`, the direct parent of its MCP server and its hooks.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pid_start_time": {
+          "description": "Start time of `pid` in seconds since the Unix epoch. Windows reuses PIDs, so a process\nwith the same PID but another start time is not the holder.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "session": {
+          "description": "Session the leases belong to.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SessionKey"
+            }
+          ]
+        }
+      },
+      "required": [
+        "session",
+        "pid",
+        "pid_start_time"
+      ]
+    },
+    "JobClass": {
+      "description": "Named job profiles. Their values come from the `[classes]` section of the config.",
+      "oneOf": [
+        {
+          "description": "Short jobs that barely load the machine.",
+          "type": "string",
+          "const": "light"
+        },
+        {
+          "description": "Compiles, test suites, and other CPU-bound work.",
+          "type": "string",
+          "const": "cpu_heavy"
+        },
+        {
+          "description": "Training, rendering, games, and other GPU-bound work.",
+          "type": "string",
+          "const": "gpu_heavy"
+        },
+        {
+          "description": "Jobs that load both the CPU and the GPU.",
+          "type": "string",
+          "const": "mixed"
+        }
+      ]
+    },
+    "JobProcess": {
+      "description": "The process shown for a job.",
+      "type": "object",
+      "properties": {
+        "bound": {
+          "description": "Whether this is the root of the command's bound process tree, the only tree a kill\nends. `false` means it is the session's busiest process, shown for display only.",
+          "type": "boolean"
+        },
+        "exe": {
+          "description": "Full path of the executable, for its icon; `None` when it could not be read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Executable name, for example `cargo.exe`.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "Process ID.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "pid",
+        "name",
+        "bound"
+      ]
+    },
+    "JobProfile": {
+      "description": "Resources a job is expected to need while it runs.",
+      "type": "object",
+      "properties": {
+        "cores": {
+          "description": "Logical cores the job keeps busy.",
+          "type": "number",
+          "format": "float"
+        },
+        "est_secs": {
+          "description": "Expected run time.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "gpu_pct": {
+          "description": "GPU engine load as a percentage of one adapter.",
+          "type": "number",
+          "format": "float"
+        },
+        "ram_mb": {
+          "description": "Peak resident memory.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vram_mb": {
+          "description": "Peak dedicated video memory.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "cores",
+        "ram_mb",
+        "gpu_pct",
+        "vram_mb",
+        "est_secs"
+      ]
+    },
+    "Lease": {
+      "description": "A reservation of machine resources for one job.",
+      "type": "object",
+      "properties": {
+        "class": {
+          "description": "Class the profile was taken from, or `None` for a custom profile.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/JobClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cwd": {
+          "description": "Working directory of the command, or empty when the requester did not say.",
+          "type": "string",
+          "default": ""
+        },
+        "end_cause": {
+          "description": "Why the lease ended; `None` while it is queued or active, and for leases that ended\nbefore causes were recorded.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EndCause"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ended_at_ms": {
+          "description": "When the lease was released or expired.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "expires_at_ms": {
+          "description": "When the lease expires unless a heartbeat arrives first.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "granted_at_ms": {
+          "description": "When the lease became active.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "holder": {
+          "description": "Session that owns the lease.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Holder"
+            }
+          ]
+        },
+        "id": {
+          "description": "Lease ID.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LeaseId"
+            }
+          ]
+        },
+        "kind": {
+          "description": "How the lease shares the machine.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LeaseKind"
+            }
+          ]
+        },
+        "label": {
+          "description": "What the lease is for, usually the command that will run.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "Resources reserved while the lease is active.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/JobProfile"
+            }
+          ]
+        },
+        "requested_at_ms": {
+          "description": "When the lease was requested, in milliseconds since the Unix epoch.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "state": {
+          "description": "Lifecycle state.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LeaseState"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "holder",
+        "kind",
+        "state",
+        "profile",
+        "label",
+        "requested_at_ms",
+        "expires_at_ms"
+      ]
+    },
+    "LeaseId": {
+      "description": "Identifies a lease. Assigned by the daemon's database when the lease is first stored.",
+      "type": "integer",
+      "format": "int64"
+    },
+    "LeaseKind": {
+      "description": "How a lease shares the machine.",
+      "oneOf": [
+        {
+          "description": "Runs alongside other leases as long as their reservations fit.",
+          "type": "string",
+          "const": "normal"
+        },
+        {
+          "description": "Runs alone on a quiet machine so that measurements are not disturbed.",
+          "type": "string",
+          "const": "benchmark_exclusive"
+        }
+      ]
+    },
+    "LeaseState": {
+      "description": "Where a lease is in its lifecycle.",
+      "oneOf": [
+        {
+          "description": "Waiting for resources.",
+          "type": "string",
+          "const": "queued"
+        },
+        {
+          "description": "Granted; its reservation counts against the machine.",
+          "type": "string",
+          "const": "active"
+        },
+        {
+          "description": "Released by its holder.",
+          "type": "string",
+          "const": "released"
+        },
+        {
+          "description": "Ended by the daemon because the heartbeat stopped or the holder died.",
+          "type": "string",
+          "const": "expired"
+        }
+      ]
+    },
+    "Meters": {
+      "description": "Machine meters with the share that leases reserve.",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "Processor load.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/CpuMeter"
+            }
+          ]
+        },
+        "drives": {
+          "description": "Every fixed drive, by drive letter.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DriveUsage"
+          }
+        },
+        "gpus": {
+          "description": "Every GPU adapter.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GpuMeter"
+          }
+        },
+        "headroom_pct": {
+          "description": "Percentage of each resource that leases never take, from `admission.headroom_pct`.",
+          "type": "number",
+          "format": "float"
+        },
+        "ram": {
+          "description": "Physical memory.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RamMeter"
+            }
+          ]
+        }
+      },
+      "required": [
+        "headroom_pct",
+        "cpu",
+        "ram",
+        "gpus",
+        "drives"
+      ]
+    },
+    "NoiseReport": {
+      "description": "Load from processes outside the holder's session while a benchmark lease was active.\n\nCPU is the summed per-process load of every other session and of processes outside all\nsessions. Kernel and interrupt time belongs to no process, so it is not counted: it would\notherwise charge the benchmark's own system time as noise.",
+      "type": "object",
+      "properties": {
+        "avg_cpu_pct": {
+          "description": "Average CPU load of other processes, as a percentage of all logical processors.",
+          "type": "number",
+          "format": "float"
+        },
+        "avg_gpu_pct": {
+          "description": "Average GPU engine load of other processes, as a percentage of one adapter.",
+          "type": "number",
+          "format": "float"
+        },
+        "peak_cpu_pct": {
+          "description": "Peak CPU load of other processes.",
+          "type": "number",
+          "format": "float"
+        },
+        "peak_gpu_pct": {
+          "description": "Peak GPU engine load of other processes.",
+          "type": "number",
+          "format": "float"
+        },
+        "quiet_at_start": {
+          "description": "Whether the machine met the quiet limits when the lease was granted. `false` means it\nwas granted anyway after the longest quiet wait.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "avg_cpu_pct",
+        "peak_cpu_pct",
+        "avg_gpu_pct",
+        "peak_gpu_pct",
+        "quiet_at_start"
+      ]
+    },
+    "Notice": {
+      "description": "A kill or removal that Claude must hear about once.",
+      "type": "object",
+      "properties": {
+        "cause": {
+          "description": "What the user did: [`EndCause::Killed`] or [`EndCause::Removed`].",
+          "allOf": [
+            {
+              "$ref": "#/definitions/EndCause"
+            }
+          ]
+        },
+        "command": {
+          "description": "The lease's label, usually the command.",
+          "type": "string"
+        },
+        "delivered_at_ms": {
+          "description": "When a hook or tool result told the session, or `None` while it has not been told.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "ended_at_ms": {
+          "description": "When the lease ended, in milliseconds since the Unix epoch.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "lease_id": {
+          "description": "Lease the notice is about. A lease ends once, so this also identifies the notice.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LeaseId"
+            }
+          ]
+        },
+        "session": {
+          "description": "Session to tell.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SessionKey"
+            }
+          ]
+        }
+      },
+      "required": [
+        "lease_id",
+        "session",
+        "cause",
+        "command",
+        "ended_at_ms"
+      ]
+    },
+    "QueuedJob": {
+      "description": "A queued lease and why it waits.",
+      "type": "object",
+      "properties": {
+        "lease": {
+          "description": "The lease.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Lease"
+            }
+          ]
+        },
+        "position": {
+          "description": "Place in the queue, starting at 1.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "verdict": {
+          "description": "Why it waits, the expected wait, and benchmark progress when it is a benchmark.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Verdict"
+            }
+          ]
+        }
+      },
+      "required": [
+        "lease",
+        "position",
+        "verdict"
+      ]
+    },
+    "RamMeter": {
+      "description": "Physical memory.",
+      "type": "object",
+      "properties": {
+        "reserved_mb": {
+          "description": "Memory reserved by active leases.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "total_mb": {
+          "description": "Installed physical memory.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "used_mb": {
+          "description": "Physical memory in use.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "total_mb",
+        "used_mb",
+        "reserved_mb"
+      ]
+    },
+    "RecentRun": {
+      "description": "A finished job.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The lease's label, usually the command as it was run.",
+          "type": "string"
+        },
+        "cwd": {
+          "description": "Working directory of the command.",
+          "type": "string"
+        },
+        "declared": {
+          "description": "Profile the lease reserved.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/JobProfile"
+            }
+          ]
+        },
+        "end_cause": {
+          "description": "Why it ended; `None` for runs recorded before causes were.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EndCause"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ended_at_ms": {
+          "description": "End of the run, in milliseconds since the Unix epoch.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "lease_id": {
+          "description": "Lease the job ran under, if the lease is still stored.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LeaseId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "noise": {
+          "description": "Background load during the run; present only for benchmark leases.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NoiseReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session": {
+          "description": "Session that ran it; `None` for runs recorded before sessions were.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "started_at_ms": {
+          "description": "Start of the run, in milliseconds since the Unix epoch.",
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "command",
+        "cwd",
+        "declared",
+        "started_at_ms",
+        "ended_at_ms"
+      ]
+    },
+    "ResourceUsage": {
+      "description": "Resources used by a process or a group of processes, in the units of [`JobProfile`].",
+      "type": "object",
+      "properties": {
+        "cores": {
+          "description": "CPU load in logical cores, for example `2.5` for two and a half busy cores.",
+          "type": "number",
+          "format": "float"
+        },
+        "gpu_pct": {
+          "description": "GPU engine load as a percentage of one adapter.",
+          "type": "number",
+          "format": "float"
+        },
+        "ram_mb": {
+          "description": "Resident memory.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vram_mb": {
+          "description": "Dedicated video memory.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "cores",
+        "ram_mb",
+        "gpu_pct",
+        "vram_mb"
+      ]
+    },
+    "SessionKey": {
+      "description": "Identifies a Claude Code session by its `CLAUDE_CODE_SESSION_ID`.\n\nThe MCP server reads the value from its environment and the hook reads `session_id` from\nits stdin JSON; both see the same string.",
+      "type": "string"
+    },
+    "UiSession": {
+      "description": "One registered Claude session.",
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "description": "Working directory of the session's most recent lease, which names its project; `None`\nwhen no lease gave one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session": {
+          "description": "Session ID.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SessionKey"
+            }
+          ]
+        },
+        "usage": {
+          "description": "Live usage of the session's whole process subtree.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ResourceUsage"
+            }
+          ]
+        }
+      },
+      "required": [
+        "session",
+        "usage"
+      ]
+    },
+    "Verdict": {
+      "description": "The admission engine's answer. Response of `POST /can-fit`.",
+      "type": "object",
+      "properties": {
+        "benchmark": {
+          "description": "Where a benchmark at the head of the queue stands; `None` for other requests.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BenchmarkProgress"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fits": {
+          "description": "Whether the job could start now.",
+          "type": "boolean"
+        },
+        "reasons": {
+          "description": "Human-readable explanations, one per limiting or notable factor.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "wait_estimate_secs": {
+          "description": "Expected wait before the job fits, when the daemon can estimate it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "fits",
+        "reasons"
+      ]
+    }
+  }
+}

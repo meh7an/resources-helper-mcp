@@ -1,0 +1,32 @@
+{
+  "generated_at_ms": 1792824720000,
+  "service": {
+    "version": "0.2.0",
+    "pid": 58260,
+    "uptime_secs": 4
+  },
+  "first_session_at_ms": null,
+  "sessions": [],
+  "active": [],
+  "queue": [],
+  "meters": {
+    "headroom_pct": 15.0,
+    "cpu": {
+      "logical_cores": 16,
+      "usage_pct": 2.5,
+      "history_pct": [
+        2.5
+      ],
+      "reserved_cores": 0.0
+    },
+    "ram": {
+      "total_mb": 32768,
+      "used_mb": 22938,
+      "reserved_mb": 0
+    },
+    "gpus": [],
+    "drives": []
+  },
+  "recent": [],
+  "notices": []
+}

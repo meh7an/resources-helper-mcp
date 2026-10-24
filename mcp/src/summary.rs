@@ -1,7 +1,6 @@
 //! The compact machine view `system_snapshot` returns, without per-core or per-process
 //! detail.
 
-use rh_core::admission::busiest_engine_pct;
 use rh_shared::types::{MemStats, ResourceUsage, Rolling, SessionKey, Snapshot};
 use serde::Serialize;
 
@@ -62,8 +61,8 @@ impl SnapshotSummary {
                 .iter()
                 .map(|gpu| GpuSummary {
                     name: gpu.name.clone(),
-                    busiest_engine_pct: busiest_engine_pct(&gpu.engines, |load| load.avg_1s),
-                    busiest_engine_pct_10s: busiest_engine_pct(&gpu.engines, |load| load.avg_10s),
+                    busiest_engine_pct: gpu.engines.busiest(|load| load.avg_1s),
+                    busiest_engine_pct_10s: gpu.engines.busiest(|load| load.avg_10s),
                     vram_used_mb: gpu.dedicated_used_mb,
                     vram_total_mb: gpu.dedicated_total_mb,
                 })

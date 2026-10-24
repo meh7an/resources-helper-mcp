@@ -3,6 +3,7 @@ use std::ops::AddAssign;
 use serde::{Deserialize, Serialize};
 
 /// Identifies a lease. Assigned by the daemon's database when the lease is first stored.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct LeaseId(pub i64);
@@ -11,11 +12,13 @@ pub struct LeaseId(pub i64);
 ///
 /// The MCP server reads the value from its environment and the hook reads `session_id` from
 /// its stdin JSON; both see the same string.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionKey(pub String);
 
 /// The process a session's leases live and die with.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Holder {
     /// Session the leases belong to.
@@ -77,6 +80,21 @@ pub struct GpuEngines {
     pub video_pct: Rolling,
 }
 
+impl GpuEngines {
+    /// Load of the busiest engine group, read from the window `pick` selects.
+    pub fn busiest(&self, pick: fn(&Rolling) -> f32) -> f32 {
+        [
+            self.three_d_pct,
+            self.compute_pct,
+            self.copy_pct,
+            self.video_pct,
+        ]
+        .iter()
+        .map(pick)
+        .fold(0.0, f32::max)
+    }
+}
+
 /// One GPU adapter as reported by the Windows PDH counters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GpuAdapter {
@@ -95,6 +113,7 @@ pub struct GpuAdapter {
 }
 
 /// Resources used by a process or a group of processes, in the units of [`JobProfile`].
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct ResourceUsage {
     /// CPU load in logical cores, for example `2.5` for two and a half busy cores.
@@ -123,6 +142,9 @@ pub struct ProcessUsage {
     pub pid: u32,
     /// Executable name, for example `cargo.exe`.
     pub name: String,
+    /// Full path of the executable, when the sampler could read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
     /// Resources the process uses.
     pub usage: ResourceUsage,
 }
@@ -153,9 +175,29 @@ pub struct Snapshot {
     pub sessions: Vec<SessionUsage>,
     /// Usage of processes outside every registered session.
     pub unattributed: ResourceUsage,
+    /// Every fixed drive, by drive letter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drives: Vec<DriveUsage>,
+}
+
+/// Space and activity of one fixed drive.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriveUsage {
+    /// Drive letter with its colon, for example `C:`.
+    pub name: String,
+    /// Capacity of the volume.
+    pub total_mb: u64,
+    /// Space in use.
+    pub used_mb: u64,
+    /// Bytes read per second over the last second.
+    pub read_bytes_per_sec: u64,
+    /// Bytes written per second over the last second.
+    pub write_bytes_per_sec: u64,
 }
 
 /// Resources a job is expected to need while it runs.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct JobProfile {
     /// Logical cores the job keeps busy.
@@ -184,6 +226,7 @@ impl JobProfile {
 }
 
 /// Named job profiles. Their values come from the `[classes]` section of the config.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -214,6 +257,7 @@ impl JobClass {
 }
 
 /// How a lease shares the machine.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -238,6 +282,7 @@ impl LeaseKind {
 }
 
 /// Where a lease is in its lifecycle.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -267,7 +312,42 @@ impl LeaseState {
     }
 }
 
+/// Why a lease ended.
+///
+/// Kept apart from [`LeaseState`], whose values are fixed by the database's CHECK constraints
+/// and by older `rh-mcp` builds that reject unknown states.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum EndCause {
+    /// Its holder released it.
+    Released,
+    /// The daemon ended it because the heartbeat stopped or the holder died.
+    Expired,
+    /// The user stopped the job and its process tree.
+    Killed,
+    /// The user removed the request from the queue before it started.
+    Removed,
+}
+
+impl EndCause {
+    /// Every cause, in declaration order.
+    pub const ALL: [Self; 4] = [Self::Released, Self::Expired, Self::Killed, Self::Removed];
+
+    /// The name used in storage and on the wire, for example `killed`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Released => "released",
+            Self::Expired => "expired",
+            Self::Killed => "killed",
+            Self::Removed => "removed",
+        }
+    }
+}
+
 /// A reservation of machine resources for one job.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lease {
     /// Lease ID.
@@ -295,6 +375,10 @@ pub struct Lease {
     pub ended_at_ms: Option<i64>,
     /// When the lease expires unless a heartbeat arrives first.
     pub expires_at_ms: i64,
+    /// Why the lease ended; `None` while it is queued or active, and for leases that ended
+    /// before causes were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_cause: Option<EndCause>,
 }
 
 /// Load from processes outside the holder's session while a benchmark lease was active.
@@ -302,6 +386,7 @@ pub struct Lease {
 /// CPU is the summed per-process load of every other session and of processes outside all
 /// sessions. Kernel and interrupt time belongs to no process, so it is not counted: it would
 /// otherwise charge the benchmark's own system time as noise.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct NoiseReport {
     /// Average CPU load of other processes, as a percentage of all logical processors.
@@ -405,6 +490,73 @@ mod tests {
         for state in LeaseState::ALL {
             assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());
         }
+        for cause in EndCause::ALL {
+            assert_eq!(serde_json::to_value(cause).unwrap(), cause.as_str());
+        }
+    }
+
+    #[test]
+    fn test_lease_with_end_cause_round_trips_and_writes_snake_case() {
+        let lease = Lease {
+            state: LeaseState::Released,
+            ended_at_ms: Some(1_793_000_090_000),
+            end_cause: Some(EndCause::Killed),
+            ..sample_lease()
+        };
+        assert_json_round_trip(&lease);
+        assert_eq!(serde_json::to_value(&lease).unwrap()["end_cause"], "killed");
+    }
+
+    #[test]
+    fn test_lease_without_end_cause_omits_the_field() {
+        let value = serde_json::to_value(sample_lease()).unwrap();
+        assert!(value.get("end_cause").is_none());
+    }
+
+    #[test]
+    fn test_v0_1_shapes_decode_without_new_fields() {
+        let mut lease = serde_json::to_value(sample_lease()).unwrap();
+        lease.as_object_mut().unwrap().remove("end_cause");
+        let lease: Lease = serde_json::from_value(lease).unwrap();
+        assert_eq!(lease.end_cause, None);
+
+        let mut snapshot = serde_json::to_value(sample_snapshot()).unwrap();
+        snapshot.as_object_mut().unwrap().remove("drives");
+        snapshot["sessions"][0]["processes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("exe");
+        let snapshot: Snapshot = serde_json::from_value(snapshot).unwrap();
+        assert!(snapshot.drives.is_empty());
+        assert_eq!(snapshot.sessions[0].processes[0].exe, None);
+    }
+
+    #[test]
+    fn test_snapshot_without_drives_and_exe_omits_both_fields() {
+        let mut snapshot = sample_snapshot();
+        snapshot.drives.clear();
+        snapshot.sessions[0].processes[0].exe = None;
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert!(value.get("drives").is_none());
+        assert!(value["sessions"][0]["processes"][0].get("exe").is_none());
+    }
+
+    #[test]
+    fn test_gpu_engines_busiest_reads_the_picked_window_of_the_busiest_group() {
+        let rolling = |avg_1s, avg_10s| Rolling {
+            avg_1s,
+            avg_10s,
+            avg_60s: 0.0,
+        };
+        let engines = GpuEngines {
+            three_d_pct: rolling(12.0, 40.0),
+            compute_pct: rolling(55.5, 20.0),
+            copy_pct: rolling(1.0, 1.0),
+            video_pct: rolling(0.0, 0.0),
+        };
+        assert_eq!(engines.busiest(|load| load.avg_1s), 55.5);
+        assert_eq!(engines.busiest(|load| load.avg_10s), 40.0);
+        assert_eq!(GpuEngines::default().busiest(|load| load.avg_1s), 0.0);
     }
 
     #[test]

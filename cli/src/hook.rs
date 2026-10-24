@@ -275,6 +275,7 @@ mod tests {
             granted_at_ms: None,
             ended_at_ms: None,
             expires_at_ms: 60_000,
+            end_cause: None,
         }
     }
 

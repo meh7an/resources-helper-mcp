@@ -32,6 +32,7 @@ pub(crate) fn snapshot(cpu_pct: f32, ram_used_mb: u64, gpu: Option<GpuAdapter>) 
         gpus: gpu.into_iter().collect(),
         sessions: Vec::new(),
         unattributed: ResourceUsage::default(),
+        drives: Vec::new(),
     }
 }
 
@@ -102,6 +103,7 @@ pub(crate) fn queued_lease(
         granted_at_ms: None,
         ended_at_ms: None,
         expires_at_ms: requested_at_ms + 60_000,
+        end_cause: None,
     }
 }
 

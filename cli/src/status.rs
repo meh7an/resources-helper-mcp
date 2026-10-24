@@ -7,7 +7,6 @@ use std::{
 };
 
 use rh_client::BlockingClient;
-use rh_core::admission::busiest_engine_pct;
 use rh_shared::{
     api::{HealthResponse, LeaseQuery},
     types::{JobClass, Lease, LeaseState, ResourceUsage, SessionKey, Snapshot},
@@ -120,7 +119,7 @@ fn format_status(
         text.push_str(&format!(
             "gpu{index}    {}: busiest engine {:.0}%, vram {} / {}\n",
             gpu.name,
-            busiest_engine_pct(&gpu.engines, |load| load.avg_1s),
+            gpu.engines.busiest(|load| load.avg_1s),
             gb(gpu.dedicated_used_mb),
             gpu.dedicated_total_mb.map_or_else(|| "?".to_owned(), gb)
         ));
@@ -260,6 +259,7 @@ mod tests {
             granted_at_ms: Some(2_000),
             ended_at_ms: None,
             expires_at_ms: 60_000,
+            end_cause: None,
         }
     }
 
@@ -294,6 +294,7 @@ mod tests {
                 processes: vec![],
             }],
             unattributed: ResourceUsage::default(),
+            drives: Vec::new(),
         }
     }
 

@@ -1,0 +1,167 @@
+{
+  "generated_at_ms": 1792824720000,
+  "service": {
+    "version": "0.2.0",
+    "pid": 58260,
+    "uptime_secs": 7380
+  },
+  "first_session_at_ms": 1792565520000,
+  "sessions": [
+    {
+      "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+      "cwd": "E:\\work\\app",
+      "usage": {
+        "cores": 0.25,
+        "ram_mb": 640,
+        "gpu_pct": 0.0,
+        "vram_mb": 0
+      }
+    },
+    {
+      "session": "b81d44f0-5a3e-4d2b-9c61-0e7f2a9d3c15",
+      "cwd": null,
+      "usage": {
+        "cores": 0.0,
+        "ram_mb": 512,
+        "gpu_pct": 0.0,
+        "vram_mb": 0
+      }
+    }
+  ],
+  "active": [],
+  "queue": [],
+  "meters": {
+    "headroom_pct": 15.0,
+    "cpu": {
+      "logical_cores": 16,
+      "usage_pct": 4.0,
+      "history_pct": [
+        48.5,
+        52.0,
+        61.25,
+        64.0,
+        58.75,
+        63.5,
+        4.0
+      ],
+      "reserved_cores": 0.0
+    },
+    "ram": {
+      "total_mb": 32768,
+      "used_mb": 22938,
+      "reserved_mb": 0
+    },
+    "gpus": [
+      {
+        "name": "NVIDIA GeForce RTX 2080 Ti",
+        "busiest_pct": 1.0,
+        "vram_used_mb": 6656,
+        "vram_total_mb": 11264,
+        "reserved_pct": 0.0,
+        "reserved_vram_mb": 0
+      }
+    ],
+    "drives": [
+      {
+        "name": "C:",
+        "total_mb": 975872,
+        "used_mb": 626688,
+        "read_bytes_per_sec": 44040192,
+        "write_bytes_per_sec": 8388608
+      },
+      {
+        "name": "E:",
+        "total_mb": 1907712,
+        "used_mb": 1258291,
+        "read_bytes_per_sec": 0,
+        "write_bytes_per_sec": 0
+      }
+    ]
+  },
+  "recent": [
+    {
+      "lease_id": 41,
+      "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+      "command": "cargo build --release",
+      "cwd": "E:\\work\\app",
+      "declared": {
+        "cores": 8.0,
+        "ram_mb": 4096,
+        "gpu_pct": 0.0,
+        "vram_mb": 0,
+        "est_secs": 300
+      },
+      "started_at_ms": 1792824188000,
+      "ended_at_ms": 1792824480000,
+      "end_cause": "released",
+      "noise": null
+    },
+    {
+      "lease_id": 39,
+      "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+      "command": "cargo clippy --workspace",
+      "cwd": "E:\\work\\app",
+      "declared": {
+        "cores": 8.0,
+        "ram_mb": 4096,
+        "gpu_pct": 0.0,
+        "vram_mb": 0,
+        "est_secs": 300
+      },
+      "started_at_ms": 1792823888000,
+      "ended_at_ms": 1792824180000,
+      "end_cause": "killed",
+      "noise": null
+    },
+    {
+      "lease_id": 37,
+      "session": "b81d44f0-5a3e-4d2b-9c61-0e7f2a9d3c15",
+      "command": "cargo bench --bench parser",
+      "cwd": "E:\\work\\app",
+      "declared": {
+        "cores": 16.0,
+        "ram_mb": 4096,
+        "gpu_pct": 0.0,
+        "vram_mb": 0,
+        "est_secs": 120
+      },
+      "started_at_ms": 1792822928000,
+      "ended_at_ms": 1792823220000,
+      "end_cause": "released",
+      "noise": {
+        "avg_cpu_pct": 1.75,
+        "peak_cpu_pct": 6.25,
+        "avg_gpu_pct": 0.0,
+        "peak_gpu_pct": 0.5,
+        "quiet_at_start": false
+      }
+    },
+    {
+      "lease_id": null,
+      "session": null,
+      "command": "cargo test",
+      "cwd": "E:\\work\\app",
+      "declared": {
+        "cores": 8.0,
+        "ram_mb": 4096,
+        "gpu_pct": 0.0,
+        "vram_mb": 0,
+        "est_secs": 300
+      },
+      "started_at_ms": 1792813628000,
+      "ended_at_ms": 1792813920000,
+      "end_cause": null,
+      "noise": null
+    }
+  ],
+  "notices": [
+    {
+      "lease_id": 39,
+      "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+      "cause": "killed",
+      "command": "cargo clippy --workspace",
+      "ended_at_ms": 1792824180000,
+      "delivered_at_ms": 1792824240000
+    }
+  ]
+}

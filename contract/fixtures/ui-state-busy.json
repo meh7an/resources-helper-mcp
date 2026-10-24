@@ -1,0 +1,237 @@
+{
+  "generated_at_ms": 1792824720000,
+  "service": {
+    "version": "0.2.0",
+    "pid": 58260,
+    "uptime_secs": 7380
+  },
+  "first_session_at_ms": 1792565520000,
+  "sessions": [
+    {
+      "session": "b81d44f0-5a3e-4d2b-9c61-0e7f2a9d3c15",
+      "cwd": "E:\\work\\ml-trainer",
+      "usage": {
+        "cores": 2.5,
+        "ram_mb": 6144,
+        "gpu_pct": 78.0,
+        "vram_mb": 4352
+      }
+    },
+    {
+      "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+      "cwd": "E:\\work\\app",
+      "usage": {
+        "cores": 7.75,
+        "ram_mb": 2970,
+        "gpu_pct": 0.0,
+        "vram_mb": 0
+      }
+    },
+    {
+      "session": "7c19e2aa-0d4b-4c8f-b3e5-9a6f2d1c8e47",
+      "cwd": null,
+      "usage": {
+        "cores": 0.25,
+        "ram_mb": 512,
+        "gpu_pct": 0.0,
+        "vram_mb": 0
+      }
+    }
+  ],
+  "active": [
+    {
+      "lease": {
+        "id": 42,
+        "holder": {
+          "session": "b81d44f0-5a3e-4d2b-9c61-0e7f2a9d3c15",
+          "pid": 22016,
+          "pid_start_time": 1792820000
+        },
+        "kind": "normal",
+        "state": "active",
+        "class": "gpu_heavy",
+        "profile": {
+          "cores": 2.0,
+          "ram_mb": 4096,
+          "gpu_pct": 80.0,
+          "vram_mb": 4096,
+          "est_secs": 1800
+        },
+        "label": "python train.py --epochs 40",
+        "cwd": "E:\\work\\ml-trainer",
+        "requested_at_ms": 1792823818500,
+        "granted_at_ms": 1792823820000,
+        "ended_at_ms": null,
+        "expires_at_ms": 1792824765000
+      },
+      "process": {
+        "pid": 30412,
+        "name": "python.exe",
+        "exe": null,
+        "bound": false
+      }
+    },
+    {
+      "lease": {
+        "id": 41,
+        "holder": {
+          "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+          "pid": 18240,
+          "pid_start_time": 1792820000
+        },
+        "kind": "normal",
+        "state": "active",
+        "class": "cpu_heavy",
+        "profile": {
+          "cores": 8.0,
+          "ram_mb": 4096,
+          "gpu_pct": 0.0,
+          "vram_mb": 0,
+          "est_secs": 300
+        },
+        "label": "cargo build --release",
+        "cwd": "E:\\work\\app",
+        "requested_at_ms": 1792824532500,
+        "granted_at_ms": 1792824534000,
+        "ended_at_ms": null,
+        "expires_at_ms": 1792824765000
+      },
+      "process": {
+        "pid": 18244,
+        "name": "cargo.exe",
+        "exe": "C:\\Users\\Mehran\\.cargo\\bin\\cargo.exe",
+        "bound": true
+      }
+    }
+  ],
+  "queue": [
+    {
+      "lease": {
+        "id": 43,
+        "holder": {
+          "session": "b81d44f0-5a3e-4d2b-9c61-0e7f2a9d3c15",
+          "pid": 22016,
+          "pid_start_time": 1792820000
+        },
+        "kind": "normal",
+        "state": "queued",
+        "class": "light",
+        "profile": {
+          "cores": 1.0,
+          "ram_mb": 1024,
+          "gpu_pct": 0.0,
+          "vram_mb": 0,
+          "est_secs": 120
+        },
+        "label": "npm test",
+        "cwd": "E:\\work\\ml-trainer",
+        "requested_at_ms": 1792824678000,
+        "granted_at_ms": null,
+        "ended_at_ms": null,
+        "expires_at_ms": 1792824765000
+      },
+      "position": 1,
+      "verdict": {
+        "fits": false,
+        "reasons": [
+          "CPU: 1 core requested, 0.4 free after headroom"
+        ],
+        "wait_estimate_secs": 120
+      }
+    },
+    {
+      "lease": {
+        "id": 44,
+        "holder": {
+          "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+          "pid": 18240,
+          "pid_start_time": 1792820000
+        },
+        "kind": "normal",
+        "state": "queued",
+        "class": null,
+        "profile": {
+          "cores": 12.0,
+          "ram_mb": 8192,
+          "gpu_pct": 0.0,
+          "vram_mb": 0,
+          "est_secs": 240
+        },
+        "label": "cargo test --workspace",
+        "cwd": "E:\\work\\app",
+        "requested_at_ms": 1792824702000,
+        "granted_at_ms": null,
+        "ended_at_ms": null,
+        "expires_at_ms": 1792824765000
+      },
+      "position": 2,
+      "verdict": {
+        "fits": false,
+        "reasons": [
+          "CPU: 12 cores requested, 0.4 free after headroom",
+          "1 lease(s) queued ahead"
+        ],
+        "wait_estimate_secs": null
+      }
+    }
+  ],
+  "meters": {
+    "headroom_pct": 15.0,
+    "cpu": {
+      "logical_cores": 16,
+      "usage_pct": 64.0,
+      "history_pct": [
+        48.5,
+        52.0,
+        61.25,
+        64.0,
+        58.75,
+        63.5,
+        64.0
+      ],
+      "reserved_cores": 10.0
+    },
+    "ram": {
+      "total_mb": 32768,
+      "used_mb": 22938,
+      "reserved_mb": 8192
+    },
+    "gpus": [
+      {
+        "name": "NVIDIA GeForce RTX 2080 Ti",
+        "busiest_pct": 78.0,
+        "vram_used_mb": 6656,
+        "vram_total_mb": 11264,
+        "reserved_pct": 80.0,
+        "reserved_vram_mb": 4096
+      }
+    ],
+    "drives": [
+      {
+        "name": "C:",
+        "total_mb": 975872,
+        "used_mb": 626688,
+        "read_bytes_per_sec": 44040192,
+        "write_bytes_per_sec": 8388608
+      },
+      {
+        "name": "E:",
+        "total_mb": 1907712,
+        "used_mb": 1258291,
+        "read_bytes_per_sec": 0,
+        "write_bytes_per_sec": 0
+      }
+    ]
+  },
+  "recent": [],
+  "notices": [
+    {
+      "lease_id": 39,
+      "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+      "cause": "killed",
+      "command": "cargo clippy --workspace",
+      "ended_at_ms": 1792824700000,
+      "delivered_at_ms": null
+    }
+  ]
+}

@@ -1,0 +1,167 @@
+{
+  "generated_at_ms": 1792824720000,
+  "service": {
+    "version": "0.2.0",
+    "pid": 58260,
+    "uptime_secs": 7380
+  },
+  "first_session_at_ms": 1792565520000,
+  "sessions": [
+    {
+      "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+      "cwd": "E:\\work\\app",
+      "usage": {
+        "cores": 0.5,
+        "ram_mb": 1024,
+        "gpu_pct": 0.0,
+        "vram_mb": 0
+      }
+    },
+    {
+      "session": "b81d44f0-5a3e-4d2b-9c61-0e7f2a9d3c15",
+      "cwd": "E:\\work\\tools",
+      "usage": {
+        "cores": 0.25,
+        "ram_mb": 768,
+        "gpu_pct": 0.0,
+        "vram_mb": 0
+      }
+    }
+  ],
+  "active": [],
+  "queue": [
+    {
+      "lease": {
+        "id": 51,
+        "holder": {
+          "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+          "pid": 18240,
+          "pid_start_time": 1792820000
+        },
+        "kind": "benchmark_exclusive",
+        "state": "queued",
+        "class": "cpu_heavy",
+        "profile": {
+          "cores": 16.0,
+          "ram_mb": 4096,
+          "gpu_pct": 0.0,
+          "vram_mb": 0,
+          "est_secs": 120
+        },
+        "label": "cargo bench --bench parser",
+        "cwd": "E:\\work\\app",
+        "requested_at_ms": 1792824648000,
+        "granted_at_ms": null,
+        "ended_at_ms": null,
+        "expires_at_ms": 1792824765000
+      },
+      "position": 1,
+      "verdict": {
+        "fits": false,
+        "reasons": [
+          "benchmark: measuring background load (6 of 10 s)"
+        ],
+        "wait_estimate_secs": null,
+        "benchmark": {
+          "phase": "measuring",
+          "measured_secs": 6,
+          "needed_secs": 10,
+          "cpu_avg_pct": 3.0,
+          "gpu_avg_pct": 0.5
+        }
+      }
+    },
+    {
+      "lease": {
+        "id": 52,
+        "holder": {
+          "session": "b81d44f0-5a3e-4d2b-9c61-0e7f2a9d3c15",
+          "pid": 22016,
+          "pid_start_time": 1792820000
+        },
+        "kind": "normal",
+        "state": "queued",
+        "class": "cpu_heavy",
+        "profile": {
+          "cores": 8.0,
+          "ram_mb": 4096,
+          "gpu_pct": 0.0,
+          "vram_mb": 0,
+          "est_secs": 300
+        },
+        "label": "cargo build",
+        "cwd": "E:\\work\\tools",
+        "requested_at_ms": 1792824690000,
+        "granted_at_ms": null,
+        "ended_at_ms": null,
+        "expires_at_ms": 1792824765000
+      },
+      "position": 2,
+      "verdict": {
+        "fits": false,
+        "reasons": [
+          "1 lease(s) queued ahead"
+        ],
+        "wait_estimate_secs": null
+      }
+    }
+  ],
+  "meters": {
+    "headroom_pct": 15.0,
+    "cpu": {
+      "logical_cores": 16,
+      "usage_pct": 3.5,
+      "history_pct": [
+        48.5,
+        52.0,
+        61.25,
+        64.0,
+        58.75,
+        63.5,
+        3.5
+      ],
+      "reserved_cores": 0.0
+    },
+    "ram": {
+      "total_mb": 32768,
+      "used_mb": 22938,
+      "reserved_mb": 0
+    },
+    "gpus": [
+      {
+        "name": "NVIDIA GeForce RTX 2080 Ti",
+        "busiest_pct": 1.0,
+        "vram_used_mb": 6656,
+        "vram_total_mb": 11264,
+        "reserved_pct": 0.0,
+        "reserved_vram_mb": 0
+      },
+      {
+        "name": "Intel(R) UHD Graphics 770",
+        "busiest_pct": 3.0,
+        "vram_used_mb": 0,
+        "vram_total_mb": null,
+        "reserved_pct": 0.0,
+        "reserved_vram_mb": 0
+      }
+    ],
+    "drives": [
+      {
+        "name": "C:",
+        "total_mb": 975872,
+        "used_mb": 626688,
+        "read_bytes_per_sec": 44040192,
+        "write_bytes_per_sec": 8388608
+      },
+      {
+        "name": "E:",
+        "total_mb": 1907712,
+        "used_mb": 1258291,
+        "read_bytes_per_sec": 0,
+        "write_bytes_per_sec": 0
+      }
+    ]
+  },
+  "recent": [],
+  "notices": []
+}

@@ -3,8 +3,9 @@ use std::fmt::Debug;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::types::{
-    CpuStats, GpuAdapter, GpuEngines, Holder, JobClass, JobProfile, Lease, LeaseId, LeaseKind,
-    LeaseState, MemStats, ProcessUsage, ResourceUsage, Rolling, SessionKey, SessionUsage, Snapshot,
+    CpuStats, DriveUsage, GpuAdapter, GpuEngines, Holder, JobClass, JobProfile, Lease, LeaseId,
+    LeaseKind, LeaseState, MemStats, ProcessUsage, ResourceUsage, Rolling, SessionKey,
+    SessionUsage, Snapshot,
 };
 
 /// Serializes `value` to JSON, parses it back, and asserts nothing changed.
@@ -54,6 +55,7 @@ pub(crate) fn sample_session_usage() -> SessionUsage {
         processes: vec![ProcessUsage {
             pid: 20_112,
             name: "cargo.exe".into(),
+            exe: Some(r"C:\Users\dev\.cargo\bin\cargo.exe".into()),
             usage: cargo,
         }],
     }
@@ -94,6 +96,13 @@ pub(crate) fn sample_snapshot() -> Snapshot {
             gpu_pct: 10.5,
             vram_mb: 1700,
         },
+        drives: vec![DriveUsage {
+            name: "C:".into(),
+            total_mb: 975_872,
+            used_mb: 626_688,
+            read_bytes_per_sec: 44_040_192,
+            write_bytes_per_sec: 8_388_608,
+        }],
     }
 }
 
@@ -117,5 +126,6 @@ pub(crate) fn sample_lease() -> Lease {
         granted_at_ms: Some(1_793_000_012_000),
         ended_at_ms: None,
         expires_at_ms: 1_793_000_072_000,
+        end_cause: None,
     }
 }

@@ -77,6 +77,7 @@ impl TryFrom<LeaseRow> for Lease {
             granted_at_ms: row.granted_at_ms,
             ended_at_ms: row.ended_at_ms,
             expires_at_ms: row.expires_at_ms,
+            end_cause: None,
         })
     }
 }

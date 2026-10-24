@@ -6,6 +6,7 @@ use crate::types::{
 };
 
 /// Response of `GET /health`.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
     /// Daemon version, from its `Cargo.toml`.
@@ -47,6 +48,7 @@ pub struct CanFitRequest {
 }
 
 /// The admission engine's answer. Response of `POST /can-fit`.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Verdict {
     /// Whether the job could start now.
@@ -61,6 +63,7 @@ pub struct Verdict {
 }
 
 /// Where a waiting benchmark lease stands, so its holder can report progress.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 #[non_exhaustive]
