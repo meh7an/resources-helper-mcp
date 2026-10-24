@@ -1,19 +1,27 @@
-//! Queries over leases, their audit trail, and job history.
+//! Queries over leases, their audit trail and notices, job history, and installation facts.
 //!
 //! Every function takes a plain connection so callers decide the transaction scope. Functions
 //! that write a lease and its event do so in one transaction, so the audit trail cannot drift
 //! from the lease row.
 
+use anyhow::{Context, bail};
 use diesel::prelude::*;
 use rh_shared::{
     api::LeaseQuery,
     config::RetentionConfig,
-    types::{Holder, JobClass, JobProfile, JobRun, Lease, LeaseId, LeaseKind, LeaseState},
+    types::{
+        EndCause, Holder, JobClass, JobProfile, JobRun, Lease, LeaseBinding, LeaseId, LeaseKind,
+        LeaseState, SessionKey,
+    },
+    ui::{Notice, RecentRun},
 };
 
 use super::{
-    models::{JobRunRow, LeaseEventRow, LeaseRow, NewJobRunRow, NewLeaseEventRow, NewLeaseRow},
-    schema::{job_runs, lease_events, leases},
+    models::{
+        BindingChanges, JobRunRow, LeaseEventRow, LeaseRow, NewJobRunRow, NewLeaseEventRow,
+        NewLeaseRow,
+    },
+    schema::{job_runs, lease_events, leases, meta},
 };
 
 /// A lease about to be stored. It is stored as `Queued`; [`transition_lease`] moves it on.
@@ -115,7 +123,8 @@ pub fn list_leases(conn: &mut SqliteConnection, query: &LeaseQuery) -> anyhow::R
 }
 
 /// Moves a lease to `to_state` and records the transition. Entering `Active` sets
-/// `granted_at_ms`; entering `Released` or `Expired` sets `ended_at_ms`.
+/// `granted_at_ms`; entering `Released` or `Expired` sets `ended_at_ms` and the cause of the
+/// same name. [`end_lease`] records the other causes.
 ///
 /// Whether the transition is allowed is the ledger's decision; this only records it.
 /// Returns `None` when no lease has `id`.
@@ -127,6 +136,40 @@ pub fn transition_lease(
     conn: &mut SqliteConnection,
     id: LeaseId,
     to_state: LeaseState,
+    at_ms: i64,
+    reason: &str,
+) -> anyhow::Result<Option<Lease>> {
+    let cause = match to_state {
+        LeaseState::Released => Some(EndCause::Released),
+        LeaseState::Expired => Some(EndCause::Expired),
+        _ => None,
+    };
+    change_state(conn, id, to_state, cause, at_ms, reason)
+}
+
+/// Ends a lease with `cause`, in the state [`EndCause::ended_state`] names, and records the
+/// transition. A kill or removal becomes a notice for the holder's session.
+///
+/// Returns `None` when no lease has `id`.
+///
+/// # Errors
+///
+/// Returns an error when the database write fails; nothing is changed in that case.
+pub fn end_lease(
+    conn: &mut SqliteConnection,
+    id: LeaseId,
+    cause: EndCause,
+    at_ms: i64,
+    reason: &str,
+) -> anyhow::Result<Option<Lease>> {
+    change_state(conn, id, cause.ended_state(), Some(cause), at_ms, reason)
+}
+
+fn change_state(
+    conn: &mut SqliteConnection,
+    id: LeaseId,
+    to_state: LeaseState,
+    cause: Option<EndCause>,
     at_ms: i64,
     reason: &str,
 ) -> anyhow::Result<Option<Lease>> {
@@ -142,11 +185,13 @@ pub fn transition_lease(
             LeaseState::Released | LeaseState::Expired => Some(at_ms),
             _ => current.ended_at_ms,
         };
+        let end_cause = cause.or(current.end_cause);
         let row = diesel::update(leases::table.find(id.0))
             .set((
                 leases::state.eq(to_state.as_str()),
                 leases::granted_at_ms.eq(granted_at_ms),
                 leases::ended_at_ms.eq(ended_at_ms),
+                leases::end_cause.eq(end_cause.map(EndCause::as_str)),
             ))
             .returning(LeaseRow::as_returning())
             .get_result(conn)?;
@@ -200,6 +245,138 @@ pub fn restore_lease(
         )?;
         Ok(true)
     })
+}
+
+/// Stores `binding` as the command lease `id` covers, replacing an earlier one. Returns
+/// `false` when no lease has `id`.
+///
+/// Bindings are not recorded in the audit trail; a lease held around several commands is
+/// rebound for each.
+///
+/// # Errors
+///
+/// Returns an error when a value does not fit its column or the database write fails.
+pub fn bind_lease(
+    conn: &mut SqliteConnection,
+    id: LeaseId,
+    binding: &LeaseBinding,
+) -> anyhow::Result<bool> {
+    let updated = diesel::update(leases::table.find(id.0))
+        .set(BindingChanges::from_binding(binding)?)
+        .execute(conn)?;
+    Ok(updated == 1)
+}
+
+/// Kills and removals `session` has not been told about yet, oldest first.
+///
+/// # Errors
+///
+/// Returns an error when the query fails or a row holds values the shared types reject.
+pub fn undelivered_notices(
+    conn: &mut SqliteConnection,
+    session: &SessionKey,
+) -> anyhow::Result<Vec<Notice>> {
+    leases::table
+        .filter(leases::session_id.eq(session.0.as_str()))
+        .filter(leases::end_cause.eq_any(notice_causes()))
+        .filter(leases::notified_at_ms.is_null())
+        .order(leases::id.asc())
+        .select((LeaseRow::as_select(), leases::notified_at_ms))
+        .load(conn)?
+        .into_iter()
+        .map(notice)
+        .collect()
+}
+
+/// Up to `limit` kills and removals of any session, delivered or not, newest end first.
+///
+/// # Errors
+///
+/// Returns an error when the query fails or a row holds values the shared types reject.
+pub fn recent_notices(conn: &mut SqliteConnection, limit: u32) -> anyhow::Result<Vec<Notice>> {
+    leases::table
+        .filter(leases::end_cause.eq_any(notice_causes()))
+        .order((leases::ended_at_ms.desc(), leases::id.desc()))
+        .limit(i64::from(limit))
+        .select((LeaseRow::as_select(), leases::notified_at_ms))
+        .load(conn)?
+        .into_iter()
+        .map(notice)
+        .collect()
+}
+
+/// Records that the holder's session was told at `at_ms` about the kill or removal of lease
+/// `id`. Returns `false` when the lease has no notice or it was already delivered, which keeps
+/// the first delivery time.
+///
+/// # Errors
+///
+/// Returns an error when the database write fails.
+pub fn mark_notice_delivered(
+    conn: &mut SqliteConnection,
+    id: LeaseId,
+    at_ms: i64,
+) -> anyhow::Result<bool> {
+    let updated = diesel::update(
+        leases::table
+            .filter(leases::id.eq(id.0))
+            .filter(leases::end_cause.eq_any(notice_causes()))
+            .filter(leases::notified_at_ms.is_null()),
+    )
+    .set(leases::notified_at_ms.eq(at_ms))
+    .execute(conn)?;
+    Ok(updated == 1)
+}
+
+fn notice_causes() -> Vec<&'static str> {
+    EndCause::ALL
+        .into_iter()
+        .filter(|cause| cause.is_notice())
+        .map(EndCause::as_str)
+        .collect()
+}
+
+fn notice((row, delivered_at_ms): (LeaseRow, Option<i64>)) -> anyhow::Result<Notice> {
+    let lease = Lease::try_from(row)?;
+    let (Some(cause), Some(ended_at_ms)) = (lease.end_cause, lease.ended_at_ms) else {
+        bail!("lease {} has a notice cause but no end time", lease.id.0);
+    };
+    Ok(Notice {
+        lease_id: lease.id,
+        session: lease.holder.session,
+        cause,
+        command: lease.label,
+        ended_at_ms,
+        delivered_at_ms,
+    })
+}
+
+/// Records that a Claude session connected at `at_ms`, unless one already had, and returns
+/// when the first one did.
+///
+/// # Errors
+///
+/// Returns an error when the database write fails or the `meta` row is missing.
+pub fn note_first_session(conn: &mut SqliteConnection, at_ms: i64) -> anyhow::Result<i64> {
+    conn.transaction(|conn| {
+        diesel::update(meta::table.filter(meta::first_session_at_ms.is_null()))
+            .set(meta::first_session_at_ms.eq(at_ms))
+            .execute(conn)?;
+        first_session_at_ms(conn)?.context("the meta row is missing")
+    })
+}
+
+/// When a Claude session first connected, or `None` before any has.
+///
+/// # Errors
+///
+/// Returns an error when the query fails.
+pub fn first_session_at_ms(conn: &mut SqliteConnection) -> anyhow::Result<Option<i64>> {
+    let at_ms = meta::table
+        .select(meta::first_session_at_ms)
+        .first::<Option<i64>>(conn)
+        .optional()?;
+    Ok(at_ms.flatten())
 }
 
 /// What one [`prune`] deleted.
@@ -345,6 +522,18 @@ pub fn latest_job_runs(conn: &mut SqliteConnection, limit: u32) -> anyhow::Resul
         .collect()
 }
 
+/// Up to `limit` finished runs of any job, newest end first, as the flyout lists them.
+///
+/// # Errors
+///
+/// Returns an error when the query fails or a row holds values the shared types reject.
+pub fn recent_runs(conn: &mut SqliteConnection, limit: u32) -> anyhow::Result<Vec<RecentRun>> {
+    Ok(latest_job_runs(conn, limit)?
+        .into_iter()
+        .map(RecentRun::from)
+        .collect())
+}
+
 fn append_event(
     conn: &mut SqliteConnection,
     lease_id: LeaseId,
@@ -364,7 +553,7 @@ fn append_event(
 #[cfg(test)]
 mod tests {
     use diesel::sql_query;
-    use rh_shared::types::{BusyUsage, NoiseReport, ResourceUsage, SessionKey};
+    use rh_shared::types::{BoundProcess, BusyUsage, NoiseReport, ResourceUsage};
 
     use super::*;
     use crate::db::test_support::{memory_conn, sample_draft};
@@ -378,6 +567,8 @@ mod tests {
         };
         JobRun {
             lease_id: None,
+            session: None,
+            end_cause: None,
             fingerprint: fingerprint.into(),
             command: "cargo build --release".into(),
             cwd: r"E:\work\app".into(),
@@ -763,6 +954,262 @@ mod tests {
         let mut conn = memory_conn();
         insert_lease(&mut conn, &sample_draft("s1", 1_000)).unwrap();
         let result = sql_query("UPDATE leases SET state = 'paused'").execute(&mut conn);
+        assert!(result.is_err());
+    }
+
+    fn active_lease(conn: &mut SqliteConnection, session: &str) -> LeaseId {
+        let id = insert_lease(conn, &sample_draft(session, 1_000))
+            .unwrap()
+            .id;
+        transition_lease(conn, id, LeaseState::Active, 2_000, "granted").unwrap();
+        id
+    }
+
+    fn notice_ids(notices: Vec<Notice>) -> Vec<LeaseId> {
+        notices.into_iter().map(|notice| notice.lease_id).collect()
+    }
+
+    #[test]
+    fn test_transition_lease_into_an_ended_state_records_the_matching_cause() {
+        let mut conn = memory_conn();
+        let active = active_lease(&mut conn, "s1");
+        assert_eq!(
+            get_lease(&mut conn, active).unwrap().unwrap().end_cause,
+            None
+        );
+        let released = transition_lease(&mut conn, active, LeaseState::Released, 3_000, "done");
+        assert_eq!(
+            released.unwrap().unwrap().end_cause,
+            Some(EndCause::Released)
+        );
+
+        let queued = insert_lease(&mut conn, &sample_draft("s1", 1_000))
+            .unwrap()
+            .id;
+        let expired = transition_lease(&mut conn, queued, LeaseState::Expired, 3_000, "reaped");
+        assert_eq!(expired.unwrap().unwrap().end_cause, Some(EndCause::Expired));
+    }
+
+    #[test]
+    fn test_end_lease_kill_and_removal_end_expired_with_their_cause() {
+        let mut conn = memory_conn();
+        let active = active_lease(&mut conn, "s1");
+        let killed = end_lease(
+            &mut conn,
+            active,
+            EndCause::Killed,
+            5_000,
+            "killed by the user",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (killed.state, killed.end_cause, killed.ended_at_ms),
+            (LeaseState::Expired, Some(EndCause::Killed), Some(5_000))
+        );
+        let last = lease_events(&mut conn, active).unwrap().pop().unwrap();
+        assert_eq!(
+            (last.from_state, last.to_state, last.reason.as_str()),
+            (
+                Some(LeaseState::Active),
+                LeaseState::Expired,
+                "killed by the user"
+            )
+        );
+
+        let queued = insert_lease(&mut conn, &sample_draft("s1", 1_000))
+            .unwrap()
+            .id;
+        let removed = end_lease(&mut conn, queued, EndCause::Removed, 6_000, "removed")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (removed.state, removed.end_cause, removed.granted_at_ms),
+            (LeaseState::Expired, Some(EndCause::Removed), None)
+        );
+        assert_eq!(
+            end_lease(&mut conn, LeaseId(404), EndCause::Killed, 1, "x").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_notice_is_returned_until_delivered_then_never_again() {
+        let mut conn = memory_conn();
+        let killed = active_lease(&mut conn, "s1");
+        end_lease(&mut conn, killed, EndCause::Killed, 5_000, "killed").unwrap();
+        let removed = insert_lease(&mut conn, &sample_draft("s1", 1_000))
+            .unwrap()
+            .id;
+        end_lease(&mut conn, removed, EndCause::Removed, 6_000, "removed").unwrap();
+        let released = active_lease(&mut conn, "s1");
+        transition_lease(&mut conn, released, LeaseState::Released, 7_000, "done").unwrap();
+        let other = active_lease(&mut conn, "s2");
+        end_lease(&mut conn, other, EndCause::Killed, 8_000, "killed").unwrap();
+
+        let session = SessionKey("s1".into());
+        let pending = undelivered_notices(&mut conn, &session).unwrap();
+        assert_eq!(
+            pending[0],
+            Notice {
+                lease_id: killed,
+                session: session.clone(),
+                cause: EndCause::Killed,
+                command: "cargo build --release".into(),
+                ended_at_ms: 5_000,
+                delivered_at_ms: None,
+            }
+        );
+        assert_eq!(notice_ids(pending), [killed, removed]);
+
+        assert!(mark_notice_delivered(&mut conn, killed, 9_000).unwrap());
+        assert_eq!(
+            notice_ids(undelivered_notices(&mut conn, &session).unwrap()),
+            [removed]
+        );
+        assert!(!mark_notice_delivered(&mut conn, killed, 9_500).unwrap());
+        assert!(mark_notice_delivered(&mut conn, removed, 9_600).unwrap());
+        assert!(undelivered_notices(&mut conn, &session).unwrap().is_empty());
+
+        let recent = recent_notices(&mut conn, 10).unwrap();
+        assert_eq!(notice_ids(recent.clone()), [other, removed, killed]);
+        assert_eq!(recent[2].delivered_at_ms, Some(9_000));
+        assert_eq!(notice_ids(recent_notices(&mut conn, 1).unwrap()), [other]);
+    }
+
+    #[test]
+    fn test_mark_notice_delivered_without_a_notice_changes_nothing() {
+        let mut conn = memory_conn();
+        let released = active_lease(&mut conn, "s1");
+        transition_lease(&mut conn, released, LeaseState::Released, 7_000, "done").unwrap();
+        let active = active_lease(&mut conn, "s1");
+        for id in [released, active, LeaseId(404)] {
+            assert!(!mark_notice_delivered(&mut conn, id, 9_000).unwrap());
+        }
+        assert!(recent_notices(&mut conn, 10).unwrap().is_empty());
+    }
+
+    fn binding(root: Option<BoundProcess>) -> LeaseBinding {
+        LeaseBinding {
+            tool_use_id: "toolu_01AbC".into(),
+            bound_at_ms: 2_500,
+            root,
+        }
+    }
+
+    const ROOT: BoundProcess = BoundProcess {
+        pid: 30_112,
+        start_time: 1_793_000_013,
+    };
+
+    #[test]
+    fn test_bind_lease_stores_the_binding_and_a_new_report_replaces_it() {
+        let mut conn = memory_conn();
+        let id = active_lease(&mut conn, "s1");
+        assert_eq!(get_lease(&mut conn, id).unwrap().unwrap().binding, None);
+
+        assert!(bind_lease(&mut conn, id, &binding(None)).unwrap());
+        assert_eq!(
+            get_lease(&mut conn, id).unwrap().unwrap().binding,
+            Some(binding(None))
+        );
+        assert!(bind_lease(&mut conn, id, &binding(Some(ROOT))).unwrap());
+        assert_eq!(
+            get_lease(&mut conn, id).unwrap().unwrap().binding,
+            Some(binding(Some(ROOT)))
+        );
+
+        let next = LeaseBinding {
+            tool_use_id: "toolu_02XyZ".into(),
+            bound_at_ms: 4_000,
+            root: None,
+        };
+        assert!(bind_lease(&mut conn, id, &next).unwrap());
+        assert_eq!(
+            get_lease(&mut conn, id).unwrap().unwrap().binding,
+            Some(next)
+        );
+        assert!(!bind_lease(&mut conn, LeaseId(404), &binding(None)).unwrap());
+        assert_eq!(lease_events(&mut conn, id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_restored_lease_keeps_its_binding() {
+        let mut conn = memory_conn();
+        let id = active_lease(&mut conn, "s1");
+        bind_lease(&mut conn, id, &binding(Some(ROOT))).unwrap();
+        assert!(restore_lease(&mut conn, id, 99_000, 50_000).unwrap());
+        let lease = get_lease(&mut conn, id).unwrap().unwrap();
+        assert_eq!(lease.binding, Some(binding(Some(ROOT))));
+        assert_eq!(lease.expires_at_ms, 99_000);
+    }
+
+    #[test]
+    fn test_lease_with_partly_set_binding_columns_is_rejected() {
+        let mut conn = memory_conn();
+        let id = active_lease(&mut conn, "s1");
+        sql_query("UPDATE leases SET bound_pid = 30112")
+            .execute(&mut conn)
+            .unwrap();
+        let error = get_lease(&mut conn, id).unwrap_err();
+        assert!(format!("{error:#}").contains("bound process"), "{error:#}");
+
+        sql_query("UPDATE leases SET bound_pid = NULL, bound_at_ms = 2500")
+            .execute(&mut conn)
+            .unwrap();
+        let error = get_lease(&mut conn, id).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("binding columns"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn test_lease_end_cause_check_constraint_rejects_unknown_name() {
+        let mut conn = memory_conn();
+        active_lease(&mut conn, "s1");
+        let result = sql_query("UPDATE leases SET end_cause = 'paused'").execute(&mut conn);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_recent_runs_carry_session_and_cause_newest_first() {
+        let mut conn = memory_conn();
+        let lease_id = active_lease(&mut conn, "s1");
+        let killed = JobRun {
+            lease_id: Some(lease_id),
+            session: Some(SessionKey("s1".into())),
+            end_cause: Some(EndCause::Killed),
+            ..sample_run("f", 3_000, None)
+        };
+        insert_job_run(&mut conn, &sample_run("f", 1_000, None)).unwrap();
+        insert_job_run(&mut conn, &killed).unwrap();
+        assert_eq!(
+            recent_job_runs(&mut conn, "f", 1).unwrap(),
+            std::slice::from_ref(&killed)
+        );
+
+        let recent = recent_runs(&mut conn, 10).unwrap();
+        let older = sample_run("f", 1_000, None);
+        assert_eq!(recent, [RecentRun::from(killed), RecentRun::from(older)]);
+        assert_eq!(recent[0].end_cause, Some(EndCause::Killed));
+        assert_eq!(recent[1].session, None);
+    }
+
+    #[test]
+    fn test_first_session_is_recorded_once() {
+        let mut conn = memory_conn();
+        assert_eq!(first_session_at_ms(&mut conn).unwrap(), None);
+        assert_eq!(note_first_session(&mut conn, 5_000).unwrap(), 5_000);
+        assert_eq!(note_first_session(&mut conn, 9_000).unwrap(), 5_000);
+        assert_eq!(first_session_at_ms(&mut conn).unwrap(), Some(5_000));
+    }
+
+    #[test]
+    fn test_meta_check_constraint_allows_only_one_row() {
+        let mut conn = memory_conn();
+        let result = sql_query("INSERT INTO meta (id, first_session_at_ms) VALUES (2, 1)")
+            .execute(&mut conn);
         assert!(result.is_err());
     }
 }

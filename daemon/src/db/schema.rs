@@ -30,6 +30,8 @@ diesel::table! {
         overlapped -> Bool,
         busy_cores -> Nullable<Float>,
         busy_gpu_pct -> Nullable<Float>,
+        session -> Nullable<Text>,
+        end_cause -> Nullable<Text>,
     }
 }
 
@@ -64,10 +66,23 @@ diesel::table! {
         ended_at_ms -> Nullable<BigInt>,
         expires_at_ms -> BigInt,
         cwd -> Text,
+        end_cause -> Nullable<Text>,
+        notified_at_ms -> Nullable<BigInt>,
+        bind_tool_use_id -> Nullable<Text>,
+        bound_at_ms -> Nullable<BigInt>,
+        bound_pid -> Nullable<BigInt>,
+        bound_pid_start_time -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    meta (id) {
+        id -> BigInt,
+        first_session_at_ms -> Nullable<BigInt>,
     }
 }
 
 diesel::joinable!(job_runs -> leases (lease_id));
 diesel::joinable!(lease_events -> leases (lease_id));
 
-diesel::allow_tables_to_appear_in_same_query!(job_runs, lease_events, leases,);
+diesel::allow_tables_to_appear_in_same_query!(job_runs, lease_events, leases, meta,);

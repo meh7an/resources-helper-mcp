@@ -10,7 +10,7 @@
 
 use rh_shared::{
     api::JobSummary,
-    types::{JobProfile, JobRun},
+    types::{EndCause, JobProfile, JobRun},
 };
 
 use crate::{
@@ -124,11 +124,12 @@ fn normalize_cwd(cwd: &str) -> String {
 }
 
 /// What up to [`ESTIMATE_RUNS`] of `runs` (newest first) needed, skipping runs that
-/// overlapped another lease of their session. `None` when no run is left.
+/// overlapped another lease of their session and runs the user killed, which stopped short of
+/// what the job needs. `None` when no run is left.
 pub fn learned(runs: &[JobRun]) -> Option<Learned> {
     let clean: Vec<&JobRun> = runs
         .iter()
-        .filter(|run| !run.overlapped)
+        .filter(|run| !run.overlapped && run.end_cause != Some(EndCause::Killed))
         .take(ESTIMATE_RUNS)
         .collect();
     if clean.is_empty() {
@@ -322,6 +323,8 @@ mod tests {
     fn run(avg_cores: f32, peak_ram_mb: u64, secs: i64) -> JobRun {
         JobRun {
             lease_id: None,
+            session: None,
+            end_cause: None,
             fingerprint: "cargo build|e:\\app".into(),
             command: "cargo build".into(),
             cwd: "E:\\app".into(),
@@ -488,6 +491,22 @@ mod tests {
         }];
         assert_eq!(super::learned(&only_overlapped), None);
         assert_eq!(super::learned(&[]), None);
+    }
+
+    #[test]
+    fn test_learned_skips_killed_runs() {
+        let killed = JobRun {
+            end_cause: Some(EndCause::Killed),
+            ..run(1.0, 500, 5)
+        };
+        let released = JobRun {
+            end_cause: Some(EndCause::Released),
+            ..run(6.0, 2_000, 60)
+        };
+        let learned = learned(&[killed.clone(), released]).unwrap();
+        assert_eq!(learned.runs, 1);
+        assert_eq!(learned.profile.est_secs, 60);
+        assert_eq!(super::learned(&[killed]), None);
     }
 
     #[test]

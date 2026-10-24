@@ -137,6 +137,8 @@ mod tests {
         };
         JobRun {
             lease_id: Some(LeaseId(41)),
+            session: None,
+            end_cause: None,
             fingerprint: "cargo build|e:\\app".into(),
             command: "cargo build 2>&1".into(),
             cwd: "E:\\app".into(),

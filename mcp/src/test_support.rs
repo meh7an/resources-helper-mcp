@@ -198,6 +198,7 @@ pub(crate) fn lease(id: i64, holder: Holder, state: LeaseState) -> Lease {
         ended_at_ms: None,
         expires_at_ms: 60_000,
         end_cause: None,
+        binding: None,
     }
 }
 

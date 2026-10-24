@@ -344,6 +344,21 @@ impl EndCause {
             Self::Removed => "removed",
         }
     }
+
+    /// The state a lease that ended this way is stored in. Kills and removals end in
+    /// `Expired`: the daemon ended the lease, not its holder, and older clients drop expired
+    /// leases the same way.
+    pub fn ended_state(self) -> LeaseState {
+        match self {
+            Self::Released => LeaseState::Released,
+            Self::Expired | Self::Killed | Self::Removed => LeaseState::Expired,
+        }
+    }
+
+    /// Whether the user caused it, so the holder's session must be told once.
+    pub fn is_notice(self) -> bool {
+        matches!(self, Self::Killed | Self::Removed)
+    }
 }
 
 /// A reservation of machine resources for one job.
@@ -379,6 +394,34 @@ pub struct Lease {
     /// before causes were recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_cause: Option<EndCause>,
+    /// The command the lease's holder last reported running under it; `None` until the hook
+    /// reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<LeaseBinding>,
+}
+
+/// The command a lease covers, as the PreToolUse hook reported it, and the process tree it
+/// runs as once that is found. A later report for the same lease replaces it.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseBinding {
+    /// Claude Code's ID for the tool call that runs the command.
+    pub tool_use_id: String,
+    /// When the hook reported the command, in milliseconds since the Unix epoch. Processes
+    /// that started before it are never part of the command.
+    pub bound_at_ms: i64,
+    /// Root of the command's process tree; `None` until it is found.
+    pub root: Option<BoundProcess>,
+}
+
+/// One process, identified across PID reuse.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundProcess {
+    /// Process ID.
+    pub pid: u32,
+    /// Start time of `pid` in seconds since the Unix epoch, as in [`Holder::pid_start_time`].
+    pub start_time: u64,
 }
 
 /// Load from processes outside the holder's session while a benchmark lease was active.
@@ -417,6 +460,12 @@ pub struct BusyUsage {
 pub struct JobRun {
     /// Lease the job ran under, if the lease is still stored.
     pub lease_id: Option<LeaseId>,
+    /// Session that ran the job; `None` for runs recorded before sessions were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionKey>,
+    /// Why the run ended; `None` for runs recorded before causes were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_cause: Option<EndCause>,
     /// Normalized command plus working directory, used to find similar runs.
     pub fingerprint: String,
     /// The lease's label, usually the command as it was run.
@@ -511,6 +560,29 @@ mod tests {
     fn test_lease_without_end_cause_omits_the_field() {
         let value = serde_json::to_value(sample_lease()).unwrap();
         assert!(value.get("end_cause").is_none());
+        assert!(value.get("binding").is_none());
+    }
+
+    #[test]
+    fn test_lease_with_binding_round_trips_with_and_without_root() {
+        let pending = LeaseBinding {
+            tool_use_id: "toolu_01AbC".into(),
+            bound_at_ms: 1_793_000_013_000,
+            root: None,
+        };
+        let bound = LeaseBinding {
+            root: Some(BoundProcess {
+                pid: 30_112,
+                start_time: 1_793_000_013,
+            }),
+            ..pending.clone()
+        };
+        for binding in [pending, bound] {
+            assert_json_round_trip(&Lease {
+                binding: Some(binding),
+                ..sample_lease()
+            });
+        }
     }
 
     #[test]
@@ -519,6 +591,7 @@ mod tests {
         lease.as_object_mut().unwrap().remove("end_cause");
         let lease: Lease = serde_json::from_value(lease).unwrap();
         assert_eq!(lease.end_cause, None);
+        assert_eq!(lease.binding, None);
 
         let mut snapshot = serde_json::to_value(sample_snapshot()).unwrap();
         snapshot.as_object_mut().unwrap().remove("drives");
@@ -613,6 +686,8 @@ mod tests {
         };
         assert_json_round_trip(&JobRun {
             lease_id: Some(LeaseId(3)),
+            session: Some(SessionKey("3f2a9c1e-session".into())),
+            end_cause: Some(EndCause::Killed),
             fingerprint: r"cargo build -p rhd|e:\work\app".into(),
             command: "cargo build -p rhd 2>&1".into(),
             cwd: r"E:\work\app".into(),

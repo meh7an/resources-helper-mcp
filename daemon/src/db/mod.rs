@@ -91,10 +91,14 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    use rh_shared::types::{EndCause, LeaseId, SessionKey};
+
     use super::*;
     use crate::db::{repo, test_support::sample_draft};
 
-    const TABLES: [&str; 3] = ["job_runs", "lease_events", "leases"];
+    const TABLES: [&str; 4] = ["job_runs", "lease_events", "leases", "meta"];
+    // End causes, lease bindings, and the meta table.
+    const V0_2_MIGRATIONS: usize = 3;
 
     #[derive(QueryableByName)]
     struct TableName {
@@ -169,5 +173,64 @@ mod tests {
         let reopened = open_pool(&path).unwrap();
         let stored = repo::get_lease(&mut reopened.get().unwrap(), lease.id).unwrap();
         assert_eq!(stored, Some(lease));
+    }
+
+    #[test]
+    fn test_v0_2_migrations_fill_in_causes_sessions_and_the_first_session() {
+        let dir = TempDir::new().unwrap();
+        let pool = open_pool(&dir.path().join("rh.db")).unwrap();
+        let mut conn = pool.get().unwrap();
+        for _ in 0..V0_2_MIGRATIONS {
+            conn.revert_last_migration(MIGRATIONS).unwrap();
+        }
+        sql_query(
+            "INSERT INTO leases (id, session_id, holder_pid, holder_pid_start_time, kind, state, \
+             class, cores, ram_mb, gpu_pct, vram_mb, est_secs, label, requested_at_ms, \
+             granted_at_ms, ended_at_ms, expires_at_ms) VALUES \
+             (1, 's1', 1, 1, 'normal', 'released', NULL, 1, 1, 0, 0, 1, 'a', 4000, 4100, 4200, 9), \
+             (2, 's2', 1, 1, 'normal', 'expired', NULL, 1, 1, 0, 0, 1, 'b', 5000, NULL, 5100, 9), \
+             (3, 's3', 1, 1, 'normal', 'active', NULL, 1, 1, 0, 0, 1, 'c', 6000, 6100, NULL, 9)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        sql_query(
+            "INSERT INTO job_runs (lease_id, fingerprint, command, cwd, declared_cores, \
+             declared_ram_mb, declared_gpu_pct, declared_vram_mb, declared_est_secs, peak_cores, \
+             avg_cores, peak_ram_mb, avg_ram_mb, peak_gpu_pct, avg_gpu_pct, peak_vram_mb, \
+             avg_vram_mb, started_at_ms, ended_at_ms) VALUES \
+             (1, 'f', 'a', '', 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 4100, 4200), \
+             (NULL, 'g', 'old', '', 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 3000, 3500)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        let causes: Vec<Option<EndCause>> = [1, 2, 3]
+            .into_iter()
+            .map(|id| {
+                repo::get_lease(&mut conn, LeaseId(id))
+                    .unwrap()
+                    .unwrap()
+                    .end_cause
+            })
+            .collect();
+        assert_eq!(
+            causes,
+            [Some(EndCause::Released), Some(EndCause::Expired), None]
+        );
+        let runs: Vec<(Option<SessionKey>, Option<EndCause>)> =
+            repo::latest_job_runs(&mut conn, 10)
+                .unwrap()
+                .into_iter()
+                .map(|run| (run.session, run.end_cause))
+                .collect();
+        assert_eq!(
+            runs,
+            [
+                (Some(SessionKey("s1".into())), Some(EndCause::Released)),
+                (None, Some(EndCause::Released)),
+            ]
+        );
+        assert_eq!(repo::first_session_at_ms(&mut conn).unwrap(), Some(3_000));
     }
 }

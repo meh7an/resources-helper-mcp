@@ -712,6 +712,8 @@ fn grant_reason(limits: &QuietLimits, quiet: Option<Quiet>) -> String {
 mod tests {
     use std::collections::HashSet;
 
+    use rh_shared::types::{BoundProcess, LeaseBinding};
+
     use super::*;
     use crate::test_support::{holder, profile, queued_lease, session_usage, snapshot};
 
@@ -1284,6 +1286,24 @@ mod tests {
         );
         // The restored active lease still holds its cores, so lease 2 waits for it.
         assert!(granted(&ledger.tick(201_000, &idle(), &alive())).is_empty());
+    }
+
+    #[test]
+    fn test_restore_keeps_the_lease_binding() {
+        let mut ledger = Ledger::new(settings());
+        let mut active = queued_lease(1, "s", timed(2.0, 300), LeaseKind::Normal, 0);
+        active.state = LeaseState::Active;
+        active.binding = Some(LeaseBinding {
+            tool_use_id: "toolu_01AbC".into(),
+            bound_at_ms: 900,
+            root: Some(BoundProcess {
+                pid: 30_112,
+                start_time: 1,
+            }),
+        });
+        let binding = active.binding.clone();
+        assert_eq!(ledger.restore(active, 10_000).unwrap().binding, binding);
+        assert_eq!(ledger.leases()[0].binding, binding);
     }
 
     #[test]

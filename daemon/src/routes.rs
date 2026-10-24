@@ -25,7 +25,8 @@ use rh_shared::{
     },
     config::Config,
     types::{
-        JobClass, JobProfile, JobRun, Lease, LeaseId, LeaseKind, LeaseState, SessionKey, Snapshot,
+        EndCause, JobClass, JobProfile, JobRun, Lease, LeaseId, LeaseKind, LeaseState, SessionKey,
+        Snapshot,
     },
 };
 use tokio::sync::watch;
@@ -371,7 +372,7 @@ async fn release(
             state.tick(&mut ledger).await?;
             released
                 .run
-                .map(|run| job_run(&state, &released.lease, &run, now))
+                .map(|run| job_run(&state, &released.lease, &run, EndCause::Released, now))
         }
         Err(LedgerError::NotFound(_)) => None,
         Err(error) => return Err(error.into()),
@@ -393,11 +394,20 @@ async fn release(
     Ok(Json(ReleaseResponse { lease, noise }))
 }
 
-/// The history row of a lease its holder released. Noise is kept for benchmarks only; other
-/// leases share the machine on purpose.
-fn job_run(state: &AppState, lease: &Lease, run: &MeteredRun, ended_at_ms: i64) -> JobRun {
+/// The history row of a lease that ran until its holder released it or the user killed it;
+/// expired and removed leases store none. Noise is kept for benchmarks only; other leases share
+/// the machine on purpose.
+fn job_run(
+    state: &AppState,
+    lease: &Lease,
+    run: &MeteredRun,
+    cause: EndCause,
+    ended_at_ms: i64,
+) -> JobRun {
     JobRun {
         lease_id: Some(lease.id),
+        session: Some(lease.holder.session.clone()),
+        end_cause: Some(cause),
         fingerprint: history::fingerprint(&state.settings().classifier, &lease.label, &lease.cwd),
         command: lease.label.clone(),
         cwd: lease.cwd.clone(),

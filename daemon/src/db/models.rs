@@ -6,8 +6,8 @@
 use anyhow::{Context, anyhow, bail};
 use diesel::prelude::*;
 use rh_shared::types::{
-    BusyUsage, Holder, JobClass, JobProfile, JobRun, Lease, LeaseId, LeaseKind, LeaseState,
-    NoiseReport, ResourceUsage, SessionKey,
+    BoundProcess, BusyUsage, EndCause, Holder, JobClass, JobProfile, JobRun, Lease, LeaseBinding,
+    LeaseId, LeaseKind, LeaseState, NoiseReport, ResourceUsage, SessionKey,
 };
 
 use super::{
@@ -36,12 +36,34 @@ pub(super) struct LeaseRow {
     ended_at_ms: Option<i64>,
     expires_at_ms: i64,
     cwd: String,
+    end_cause: Option<String>,
+    bind_tool_use_id: Option<String>,
+    bound_at_ms: Option<i64>,
+    bound_pid: Option<i64>,
+    bound_pid_start_time: Option<i64>,
 }
 
 impl TryFrom<LeaseRow> for Lease {
     type Error = anyhow::Error;
 
     fn try_from(row: LeaseRow) -> anyhow::Result<Self> {
+        let root = match (row.bound_pid, row.bound_pid_start_time) {
+            (Some(pid), Some(start_time)) => Some(BoundProcess {
+                pid: from_column(pid, "leases.bound_pid")?,
+                start_time: from_column(start_time, "leases.bound_pid_start_time")?,
+            }),
+            (None, None) => None,
+            _ => bail!("leases bound process columns are only partly set"),
+        };
+        let binding = match (row.bind_tool_use_id, row.bound_at_ms, root) {
+            (Some(tool_use_id), Some(bound_at_ms), root) => Some(LeaseBinding {
+                tool_use_id,
+                bound_at_ms,
+                root,
+            }),
+            (None, None, None) => None,
+            _ => bail!("leases binding columns are only partly set"),
+        };
         Ok(Self {
             id: LeaseId(row.id),
             holder: Holder {
@@ -77,7 +99,12 @@ impl TryFrom<LeaseRow> for Lease {
             granted_at_ms: row.granted_at_ms,
             ended_at_ms: row.ended_at_ms,
             expires_at_ms: row.expires_at_ms,
-            end_cause: None,
+            end_cause: row
+                .end_cause
+                .as_deref()
+                .map(|name| end_cause(name, "leases.end_cause"))
+                .transpose()?,
+            binding,
         })
     }
 }
@@ -121,6 +148,31 @@ impl<'a> NewLeaseRow<'a> {
             cwd: &draft.cwd,
             requested_at_ms: draft.requested_at_ms,
             expires_at_ms: draft.expires_at_ms,
+        })
+    }
+}
+
+/// The binding columns of a lease, all written together. A binding without a root clears the
+/// root a previous report found.
+#[derive(Debug, AsChangeset)]
+#[diesel(table_name = leases, treat_none_as_null = true)]
+pub(super) struct BindingChanges<'a> {
+    bind_tool_use_id: &'a str,
+    bound_at_ms: i64,
+    bound_pid: Option<i64>,
+    bound_pid_start_time: Option<i64>,
+}
+
+impl<'a> BindingChanges<'a> {
+    pub(super) fn from_binding(binding: &'a LeaseBinding) -> anyhow::Result<Self> {
+        Ok(Self {
+            bind_tool_use_id: &binding.tool_use_id,
+            bound_at_ms: binding.bound_at_ms,
+            bound_pid: binding.root.map(|root| i64::from(root.pid)),
+            bound_pid_start_time: binding
+                .root
+                .map(|root| to_column(root.start_time, "binding.root.start_time"))
+                .transpose()?,
         })
     }
 }
@@ -213,6 +265,8 @@ pub(super) struct JobRunRow {
     overlapped: bool,
     busy_cores: Option<f32>,
     busy_gpu_pct: Option<f32>,
+    session: Option<String>,
+    end_cause: Option<String>,
 }
 
 impl TryFrom<JobRunRow> for JobRun {
@@ -249,6 +303,12 @@ impl TryFrom<JobRunRow> for JobRun {
         };
         Ok(Self {
             lease_id: row.lease_id.map(LeaseId),
+            session: row.session.map(SessionKey),
+            end_cause: row
+                .end_cause
+                .as_deref()
+                .map(|name| end_cause(name, "job_runs.end_cause"))
+                .transpose()?,
             fingerprint: row.fingerprint,
             command: row.command,
             cwd: row.cwd,
@@ -310,6 +370,8 @@ pub(super) struct NewJobRunRow<'a> {
     overlapped: bool,
     busy_cores: Option<f32>,
     busy_gpu_pct: Option<f32>,
+    session: Option<&'a str>,
+    end_cause: Option<&'static str>,
 }
 
 impl<'a> NewJobRunRow<'a> {
@@ -342,6 +404,8 @@ impl<'a> NewJobRunRow<'a> {
             overlapped: run.overlapped,
             busy_cores: run.busy.map(|busy| busy.cores),
             busy_gpu_pct: run.busy.map(|busy| busy.gpu_pct),
+            session: run.session.as_ref().map(|session| session.0.as_str()),
+            end_cause: run.end_cause.map(EndCause::as_str),
         })
     }
 }
@@ -352,6 +416,10 @@ fn from_column<T: TryFrom<i64>>(value: i64, column: &str) -> anyhow::Result<T> {
 
 fn to_column(value: u64, field: &str) -> anyhow::Result<i64> {
     i64::try_from(value).with_context(|| format!("{field} is {value}, too large to store"))
+}
+
+fn end_cause(text: &str, column: &str) -> anyhow::Result<EndCause> {
+    parse_name(&EndCause::ALL, EndCause::as_str, text, column)
 }
 
 fn parse_name<T: Copy>(

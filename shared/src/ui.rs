@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     api::{HealthResponse, Verdict},
     types::{
-        DriveUsage, EndCause, JobProfile, Lease, LeaseId, NoiseReport, ResourceUsage, SessionKey,
+        DriveUsage, EndCause, JobProfile, JobRun, Lease, LeaseId, NoiseReport, ResourceUsage,
+        SessionKey,
     },
 };
 
@@ -171,6 +172,22 @@ pub struct RecentRun {
     pub end_cause: Option<EndCause>,
     /// Background load during the run; present only for benchmark leases.
     pub noise: Option<NoiseReport>,
+}
+
+impl From<JobRun> for RecentRun {
+    fn from(run: JobRun) -> Self {
+        Self {
+            lease_id: run.lease_id,
+            session: run.session,
+            command: run.command,
+            cwd: run.cwd,
+            declared: run.declared,
+            started_at_ms: run.started_at_ms,
+            ended_at_ms: run.ended_at_ms,
+            end_cause: run.end_cause,
+            noise: run.noise,
+        }
+    }
 }
 
 /// A kill or removal that Claude must hear about once.

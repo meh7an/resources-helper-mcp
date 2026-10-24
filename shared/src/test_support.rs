@@ -127,5 +127,6 @@ pub(crate) fn sample_lease() -> Lease {
         ended_at_ms: None,
         expires_at_ms: 1_793_000_072_000,
         end_cause: None,
+        binding: None,
     }
 }

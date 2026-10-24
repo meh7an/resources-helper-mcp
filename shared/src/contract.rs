@@ -108,6 +108,7 @@ fn active_lease(id: i64, holder: Holder, label: &str, cwd: &str, granted_ago_ms:
         ended_at_ms: None,
         expires_at_ms: NOW_MS + 45_000,
         end_cause: None,
+        binding: None,
     }
 }
 

@@ -216,6 +216,28 @@
         }
       ]
     },
+    "BoundProcess": {
+      "description": "One process, identified across PID reuse.",
+      "type": "object",
+      "properties": {
+        "pid": {
+          "description": "Process ID.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "start_time": {
+          "description": "Start time of `pid` in seconds since the Unix epoch, as in [`Holder::pid_start_time`].",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "pid",
+        "start_time"
+      ]
+    },
     "CpuMeter": {
       "description": "Processor load.",
       "type": "object",
@@ -533,6 +555,17 @@
       "description": "A reservation of machine resources for one job.",
       "type": "object",
       "properties": {
+        "binding": {
+          "description": "The command the lease's holder last reported running under it; `None` until the hook\nreports one.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LeaseBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "class": {
           "description": "Class the profile was taken from, or `None` for a custom profile.",
           "anyOf": [
@@ -640,6 +673,36 @@
         "label",
         "requested_at_ms",
         "expires_at_ms"
+      ]
+    },
+    "LeaseBinding": {
+      "description": "The command a lease covers, as the PreToolUse hook reported it, and the process tree it\nruns as once that is found. A later report for the same lease replaces it.",
+      "type": "object",
+      "properties": {
+        "bound_at_ms": {
+          "description": "When the hook reported the command, in milliseconds since the Unix epoch. Processes\nthat started before it are never part of the command.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "root": {
+          "description": "Root of the command's process tree; `None` until it is found.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BoundProcess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_use_id": {
+          "description": "Claude Code's ID for the tool call that runs the command.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_use_id",
+        "bound_at_ms"
       ]
     },
     "LeaseId": {
