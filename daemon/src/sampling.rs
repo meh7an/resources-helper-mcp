@@ -6,10 +6,13 @@ use std::{
 };
 
 use anyhow::Context;
-use rh_core::sampler::{RawSample, Sampler, SnapshotBuilder};
+use rh_core::{
+    process::ProcessTable,
+    sampler::{RawSample, Sampler, SnapshotBuilder},
+};
 use tokio::sync::mpsc;
 
-use crate::state::{AppState, Latest, ProcessTable};
+use crate::state::{AppState, Latest};
 
 /// Creates the sampler on the sampling thread. The Windows sampler holds PDH handles that
 /// cannot move between threads, so it must be built where it is used.

@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use rh_shared::{
     Result,
     types::{
-        CpuStats, GpuAdapter, GpuEngines, Holder, MemStats, ProcessUsage, ResourceUsage, Rolling,
-        SessionUsage, Snapshot,
+        CpuStats, DriveUsage, GpuAdapter, GpuEngines, Holder, MemStats, ProcessUsage,
+        ResourceUsage, Rolling, SessionUsage, Snapshot,
     },
 };
 
@@ -42,6 +42,8 @@ pub struct RawSample {
     pub processes: Vec<RawProcess>,
     /// Every GPU adapter.
     pub gpus: Vec<RawGpu>,
+    /// Every fixed drive, by drive letter.
+    pub drives: Vec<DriveUsage>,
 }
 
 /// One process in a [`RawSample`].
@@ -53,6 +55,8 @@ pub struct RawProcess {
     pub parent_pid: Option<u32>,
     /// Executable name.
     pub name: String,
+    /// Full path of the executable, when the OS allows reading it.
+    pub exe: Option<String>,
     /// Start time in seconds since the Unix epoch.
     pub start_time: u64,
     /// Resources the process uses.
@@ -87,6 +91,16 @@ pub struct EngineLoad {
     pub copy_pct: f32,
     /// Video encode and decode engines.
     pub video_pct: f32,
+}
+
+impl EngineLoad {
+    /// Load of the busiest engine group.
+    pub fn busiest(&self) -> f32 {
+        self.three_d_pct
+            .max(self.compute_pct)
+            .max(self.copy_pct)
+            .max(self.video_pct)
+    }
 }
 
 /// The most recent values of one measurement, newest last.
@@ -193,7 +207,7 @@ impl SnapshotBuilder {
             gpus,
             sessions,
             unattributed,
-            drives: Vec::new(),
+            drives: raw.drives,
         }
     }
 }
@@ -240,7 +254,7 @@ pub fn attribute(
                 session.processes.push(ProcessUsage {
                     pid: process.pid,
                     name: process.name.clone(),
-                    exe: None,
+                    exe: process.exe.clone(),
                     usage: process.usage,
                 });
             }
@@ -264,13 +278,7 @@ fn reconcile_gpu(gpus: &[RawGpu], sessions: &mut [SessionUsage], unattributed: &
     let vram_used_mb: u64 = gpus.iter().map(|gpu| gpu.dedicated_used_mb).sum();
     let busiest_pct = gpus
         .iter()
-        .map(|gpu| {
-            let load = gpu.engines;
-            load.three_d_pct
-                .max(load.compute_pct)
-                .max(load.copy_pct)
-                .max(load.video_pct)
-        })
+        .map(|gpu| gpu.engines.busiest())
         .fold(0.0, f32::max);
 
     let mut session_vram_mb = 0;
@@ -326,6 +334,7 @@ mod tests {
             pid,
             parent_pid,
             name: format!("p{pid}"),
+            exe: Some(format!(r"C:\bin\p{pid}.exe")),
             start_time,
             usage: usage(cores, 100),
         }
@@ -361,6 +370,13 @@ mod tests {
             },
             processes: vec![process(10, None, 1, 0.5)],
             gpus,
+            drives: vec![DriveUsage {
+                name: "C:".into(),
+                total_mb: 1_000_000,
+                used_mb: 400_000,
+                read_bytes_per_sec: 4_096,
+                write_bytes_per_sec: 0,
+            }],
         }
     }
 
@@ -546,5 +562,27 @@ mod tests {
         builder.build(raw(0.0, vec![]), &[]);
         let snapshot = builder.build(raw(0.0, vec![gpu("0x0_0x1", 10.0)]), &[]);
         assert_eq!(snapshot.gpus[0].engines.three_d_pct.avg_10s, 10.0);
+    }
+
+    #[test]
+    fn test_engine_load_busiest_is_the_highest_group() {
+        let load = EngineLoad {
+            three_d_pct: 12.0,
+            compute_pct: 70.5,
+            copy_pct: 3.0,
+            video_pct: 40.0,
+        };
+        assert_eq!(load.busiest(), 70.5);
+        assert_eq!(EngineLoad::default().busiest(), 0.0);
+    }
+
+    #[test]
+    fn test_snapshot_builder_passes_drives_and_exe_paths_through() {
+        let sample = raw(0.0, vec![]);
+        let drives = sample.drives.clone();
+        let snapshot = SnapshotBuilder::new().build(sample, &[holder("a", 10, 1)]);
+        assert_eq!(snapshot.drives, drives);
+        let process = &snapshot.sessions[0].processes[0];
+        assert_eq!(process.exe.as_deref(), Some(r"C:\bin\p10.exe"));
     }
 }

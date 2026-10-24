@@ -59,6 +59,7 @@ fn process(pid: u32, start_time: u64) -> RawProcess {
         pid,
         parent_pid: None,
         name: "claude.exe".into(),
+        exe: None,
         start_time,
         usage: ResourceUsage::default(),
     }
@@ -79,6 +80,7 @@ fn idle_machine() -> RawSample {
         },
         processes: vec![process(ALICE_PID, 100), process(BOB_PID, 200)],
         gpus: vec![],
+        drives: vec![],
     }
 }
 

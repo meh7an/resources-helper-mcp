@@ -48,10 +48,12 @@ fn machine() -> RawSample {
             pid: HOLDER_PID,
             parent_pid: None,
             name: "claude.exe".into(),
+            exe: None,
             start_time: 100,
             usage: ResourceUsage::default(),
         }],
         gpus: vec![],
+        drives: vec![],
     }
 }
 

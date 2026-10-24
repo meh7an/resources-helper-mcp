@@ -10,7 +10,7 @@ use diesel::sqlite::SqliteConnection;
 use rh_core::{
     classifier::Classifier,
     ledger::{Ledger, LedgerSettings, ProcessLiveness, Transition},
-    sampler::RawProcess,
+    process::ProcessTable,
 };
 use rh_shared::{
     config::Config,
@@ -23,35 +23,12 @@ use crate::db::{DbPool, repo};
 /// Handle the handlers receive through Axum's `State`.
 pub type AppState = Arc<Shared>;
 
-/// PIDs and start times from one sample. A holder is alive when its PID is running with the
-/// recorded start time; Windows reuses PIDs, so the PID alone proves nothing.
-#[derive(Debug, Clone, Default)]
-pub struct ProcessTable(HashMap<u32, u64>);
-
-impl ProcessTable {
-    /// The table of every process in a sample.
-    pub fn new(processes: &[RawProcess]) -> Self {
-        Self(
-            processes
-                .iter()
-                .map(|process| (process.pid, process.start_time))
-                .collect(),
-        )
-    }
-}
-
-impl ProcessLiveness for ProcessTable {
-    fn is_alive(&self, holder: &Holder) -> bool {
-        self.0.get(&holder.pid) == Some(&holder.pid_start_time)
-    }
-}
-
 /// The most recent sample.
 #[derive(Debug)]
 pub struct Latest {
     /// What clients see.
     pub snapshot: Snapshot,
-    /// What liveness checks use.
+    /// Every running process, for liveness checks and command binding.
     pub processes: ProcessTable,
 }
 

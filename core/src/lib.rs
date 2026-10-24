@@ -8,6 +8,7 @@ pub mod classifier;
 pub mod history;
 pub mod ledger;
 pub mod meter;
+pub mod process;
 pub mod sampler;
 #[cfg(test)]
 mod test_support;

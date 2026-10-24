@@ -1,10 +1,12 @@
 //! Windows implementation of [`rh_core::sampler::Sampler`]: sysinfo for CPU, memory, and
-//! processes; PDH for commit charge and GPU load; DXGI for adapter names and VRAM sizes.
-//! Also reads the current process's ancestry, which the CLI and MCP server use to find
-//! their Claude session.
+//! processes; PDH for commit charge, GPU load, and drive activity; DXGI for adapter names and
+//! VRAM sizes; the volume APIs for drive space. Also reads the current process's ancestry,
+//! which the CLI and MCP server use to find their Claude session.
 
 mod cpu;
+mod drives;
 mod dxgi;
+mod exe;
 mod gpu;
 mod pdh;
 mod process;
@@ -23,7 +25,11 @@ use rh_shared::{
 };
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
-use crate::cpu::{CpuTimes, ProcessTime};
+use crate::{
+    cpu::{CpuTimes, ProcessTime},
+    drives::Drives,
+    exe::ExeCache,
+};
 
 const BYTES_PER_MB: u64 = 1024 * 1024;
 
@@ -38,9 +44,11 @@ pub struct SystemSampler {
     commit_limit: pdh::Counter,
     gpu: Option<GpuCounters>,
     adapters: Vec<dxgi::AdapterInfo>,
+    drives: Drives,
     cpu_times: CpuTimes,
     /// Logical cores per PID since the previous refresh.
     process_cores: HashMap<u32, f32>,
+    exe_paths: ExeCache,
 }
 
 #[derive(Debug)]
@@ -74,7 +82,8 @@ impl SystemSampler {
     /// baseline for its rates.
     ///
     /// GPU data is best effort: on a machine without GPU counters (some VMs and CI runners)
-    /// samples list no adapters, and without DXGI adapters are named by LUID.
+    /// samples list no adapters, and without DXGI adapters are named by LUID. Drive activity
+    /// is best effort too: without the disk counters drives read as idle.
     ///
     /// # Errors
     ///
@@ -86,6 +95,7 @@ impl SystemSampler {
         let commit_limit = query.add(r"\Memory\Commit Limit")?;
         let gpu = GpuCounters::add(&query).ok();
         let adapters = dxgi::hardware_adapters().unwrap_or_default();
+        let drives = Drives::new(&query);
         let mut sampler = Self {
             system: System::new(),
             query,
@@ -93,8 +103,10 @@ impl SystemSampler {
             commit_limit,
             gpu,
             adapters,
+            drives,
             cpu_times: CpuTimes::default(),
             process_cores: HashMap::new(),
+            exe_paths: ExeCache::default(),
         };
         sampler.refresh()?;
         Ok(sampler)
@@ -119,8 +131,14 @@ impl SystemSampler {
                 cpu_ms: process.accumulated_cpu_time(),
             })
             .collect();
+        self.exe_paths.update(
+            times.iter().map(|time| (time.pid, time.start_time)),
+            exe::image_path,
+        );
+        let now = Instant::now();
         let logical_cores = self.system.cpus().len().max(1) as f32;
-        self.process_cores = self.cpu_times.update(Instant::now(), &times, logical_cores);
+        self.process_cores = self.cpu_times.update(now, &times, logical_cores);
+        self.drives.refresh(now);
         self.query.collect()
     }
 
@@ -204,11 +222,13 @@ impl Sampler for SystemSampler {
             .filter(|process| process.pid().as_u32() != 0)
             .map(|process| {
                 let pid = process.pid().as_u32();
+                let start_time = process.start_time();
                 RawProcess {
                     pid,
                     parent_pid: process.parent().map(Pid::as_u32),
                     name: process.name().to_string_lossy().into_owned(),
-                    start_time: process.start_time(),
+                    exe: self.exe_paths.get(pid, start_time).map(str::to_owned),
+                    start_time,
                     usage: ResourceUsage {
                         cores: self.process_cores.get(&pid).copied().unwrap_or_default(),
                         ram_mb: process.memory() / BYTES_PER_MB,
@@ -240,6 +260,7 @@ impl Sampler for SystemSampler {
             },
             processes,
             gpus: gpu.adapters,
+            drives: self.drives.read(&self.query)?,
         })
     }
 }
@@ -261,7 +282,10 @@ mod tests {
         let raw = sampler.sample().unwrap();
 
         let own = raw.processes.iter().find(|p| p.pid == process::id());
-        assert!(own.expect("own process is sampled").usage.ram_mb > 0);
+        let own = own.expect("own process is sampled");
+        assert!(own.usage.ram_mb > 0);
+        let exe = own.exe.as_deref().expect("own exe path is read");
+        assert!(exe.to_ascii_lowercase().ends_with(".exe"), "{exe}");
         assert!(raw.processes.iter().all(|p| p.pid != 0));
         assert!(!raw.per_core_pct.is_empty());
         assert!(raw.memory.total_mb > 0 && raw.memory.available_mb <= raw.memory.total_mb);
