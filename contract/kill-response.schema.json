@@ -1,0 +1,444 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KillResponse",
+  "description": "Response of `POST /leases/{id}/kill`.",
+  "type": "object",
+  "properties": {
+    "failed": {
+      "description": "Processes that could not be terminated, with what the OS said.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/UnkilledProcess"
+      }
+    },
+    "lease": {
+      "description": "The lease, ended with cause `killed`.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Lease"
+        }
+      ]
+    },
+    "spared": {
+      "description": "Processes in the tree left running on purpose, each with everything below it.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/UnkilledProcess"
+      }
+    },
+    "terminated": {
+      "description": "Processes terminated, root first.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/KilledProcess"
+      }
+    },
+    "untouched_reason": {
+      "description": "Why no process was terminated: the lease had no bound process tree, or its command had\nalready ended. The lease ended anyway. `None` when the bound tree was killed.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "lease",
+    "terminated",
+    "failed",
+    "spared"
+  ],
+  "definitions": {
+    "BoundProcess": {
+      "description": "One process, identified across PID reuse.",
+      "type": "object",
+      "properties": {
+        "pid": {
+          "description": "Process ID.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "start_time": {
+          "description": "Start time of `pid` in seconds since the Unix epoch, as in [`Holder::pid_start_time`].",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "pid",
+        "start_time"
+      ]
+    },
+    "EndCause": {
+      "description": "Why a lease ended.\n\nKept apart from [`LeaseState`], whose values are fixed by the database's CHECK constraints\nand by older `rh-mcp` builds that reject unknown states.",
+      "oneOf": [
+        {
+          "description": "Its holder released it.",
+          "type": "string",
+          "const": "released"
+        },
+        {
+          "description": "The daemon ended it because the heartbeat stopped or the holder died.",
+          "type": "string",
+          "const": "expired"
+        },
+        {
+          "description": "The user stopped the job and its process tree.",
+          "type": "string",
+          "const": "killed"
+        },
+        {
+          "description": "The user removed the request from the queue before it started.",
+          "type": "string",
+          "const": "removed"
+        }
+      ]
+    },
+    "Holder": {
+      "description": "The process a session's leases live and die with.",
+      "type": "object",
+      "properties": {
+        "pid": {
+          "description": "PID of the session's `claude.exe`, the direct parent of its MCP server and its hooks.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pid_start_time": {
+          "description": "Start time of `pid` in seconds since the Unix epoch. Windows reuses PIDs, so a process\nwith the same PID but another start time is not the holder.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "session": {
+          "description": "Session the leases belong to.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SessionKey"
+            }
+          ]
+        }
+      },
+      "required": [
+        "session",
+        "pid",
+        "pid_start_time"
+      ]
+    },
+    "JobClass": {
+      "description": "Named job profiles. Their values come from the `[classes]` section of the config.",
+      "oneOf": [
+        {
+          "description": "Short jobs that barely load the machine.",
+          "type": "string",
+          "const": "light"
+        },
+        {
+          "description": "Compiles, test suites, and other CPU-bound work.",
+          "type": "string",
+          "const": "cpu_heavy"
+        },
+        {
+          "description": "Training, rendering, games, and other GPU-bound work.",
+          "type": "string",
+          "const": "gpu_heavy"
+        },
+        {
+          "description": "Jobs that load both the CPU and the GPU.",
+          "type": "string",
+          "const": "mixed"
+        }
+      ]
+    },
+    "JobProfile": {
+      "description": "Resources a job is expected to need while it runs.",
+      "type": "object",
+      "properties": {
+        "cores": {
+          "description": "Logical cores the job keeps busy.",
+          "type": "number",
+          "format": "float"
+        },
+        "est_secs": {
+          "description": "Expected run time.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "gpu_pct": {
+          "description": "GPU engine load as a percentage of one adapter.",
+          "type": "number",
+          "format": "float"
+        },
+        "ram_mb": {
+          "description": "Peak resident memory.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vram_mb": {
+          "description": "Peak dedicated video memory.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "cores",
+        "ram_mb",
+        "gpu_pct",
+        "vram_mb",
+        "est_secs"
+      ]
+    },
+    "KilledProcess": {
+      "description": "A process a kill terminated.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Executable name, for example `cargo.exe`.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "Process ID.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "pid",
+        "name"
+      ]
+    },
+    "Lease": {
+      "description": "A reservation of machine resources for one job.",
+      "type": "object",
+      "properties": {
+        "binding": {
+          "description": "The command the lease's holder last reported running under it; `None` until the hook\nreports one.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LeaseBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "class": {
+          "description": "Class the profile was taken from, or `None` for a custom profile.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/JobClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cwd": {
+          "description": "Working directory of the command, or empty when the requester did not say.",
+          "type": "string",
+          "default": ""
+        },
+        "end_cause": {
+          "description": "Why the lease ended; `None` while it is queued or active, and for leases that ended\nbefore causes were recorded.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EndCause"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ended_at_ms": {
+          "description": "When the lease was released or expired.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "expires_at_ms": {
+          "description": "When the lease expires unless a heartbeat arrives first.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "granted_at_ms": {
+          "description": "When the lease became active.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "holder": {
+          "description": "Session that owns the lease.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Holder"
+            }
+          ]
+        },
+        "id": {
+          "description": "Lease ID.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LeaseId"
+            }
+          ]
+        },
+        "kind": {
+          "description": "How the lease shares the machine.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LeaseKind"
+            }
+          ]
+        },
+        "label": {
+          "description": "What the lease is for, usually the command that will run.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "Resources reserved while the lease is active.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/JobProfile"
+            }
+          ]
+        },
+        "requested_at_ms": {
+          "description": "When the lease was requested, in milliseconds since the Unix epoch.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "state": {
+          "description": "Lifecycle state.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LeaseState"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "holder",
+        "kind",
+        "state",
+        "profile",
+        "label",
+        "requested_at_ms",
+        "expires_at_ms"
+      ]
+    },
+    "LeaseBinding": {
+      "description": "The command a lease covers, as the PreToolUse hook reported it, and the process tree it\nruns as once that is found. A later report for the same lease replaces it.",
+      "type": "object",
+      "properties": {
+        "bound_at_ms": {
+          "description": "When the hook reported the command, in milliseconds since the Unix epoch. Processes\nthat started before it are never part of the command.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "root": {
+          "description": "Root of the command's process tree; `None` until it is found.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BoundProcess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_use_id": {
+          "description": "Claude Code's ID for the tool call that runs the command.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_use_id",
+        "bound_at_ms"
+      ]
+    },
+    "LeaseId": {
+      "description": "Identifies a lease. Assigned by the daemon's database when the lease is first stored.",
+      "type": "integer",
+      "format": "int64"
+    },
+    "LeaseKind": {
+      "description": "How a lease shares the machine.",
+      "oneOf": [
+        {
+          "description": "Runs alongside other leases as long as their reservations fit.",
+          "type": "string",
+          "const": "normal"
+        },
+        {
+          "description": "Runs alone on a quiet machine so that measurements are not disturbed.",
+          "type": "string",
+          "const": "benchmark_exclusive"
+        }
+      ]
+    },
+    "LeaseState": {
+      "description": "Where a lease is in its lifecycle.",
+      "oneOf": [
+        {
+          "description": "Waiting for resources.",
+          "type": "string",
+          "const": "queued"
+        },
+        {
+          "description": "Granted; its reservation counts against the machine.",
+          "type": "string",
+          "const": "active"
+        },
+        {
+          "description": "Released by its holder.",
+          "type": "string",
+          "const": "released"
+        },
+        {
+          "description": "Ended by the daemon because the heartbeat stopped or the holder died.",
+          "type": "string",
+          "const": "expired"
+        }
+      ]
+    },
+    "SessionKey": {
+      "description": "Identifies a Claude Code session by its `CLAUDE_CODE_SESSION_ID`.\n\nThe MCP server reads the value from its environment and the hook reads `session_id` from\nits stdin JSON; both see the same string.",
+      "type": "string"
+    },
+    "UnkilledProcess": {
+      "description": "A process in a killed tree that is still running.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Executable name, for example `claude.exe`.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "Process ID.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reason": {
+          "description": "Why it is still running.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pid",
+        "name",
+        "reason"
+      ]
+    }
+  }
+}

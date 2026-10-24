@@ -1,6 +1,6 @@
-//! Golden files for the tray app: the JSON Schema of [`UiState`] and one fixture per flyout
-//! scenario, kept in `contract/` at the repository root, and the C# types generated from the
-//! schema in the tray's logic library.
+//! Golden files for the tray app: the JSON Schemas of [`UiState`] and of the kill and remove
+//! responses, one fixture per flyout scenario and response shape, kept in `contract/` at the
+//! repository root, and the C# types generated from the schemas in the tray's logic library.
 //!
 //! The tests fail when a file no longer matches the types. Rerun them with
 //! `RH_UPDATE_CONTRACT=1` to rewrite the files, then review the diff.
@@ -13,10 +13,13 @@ use schemars::{Schema, generate::SchemaSettings};
 use serde::Serialize;
 
 use crate::{
-    api::{BenchmarkProgress, HealthResponse, Verdict},
+    api::{
+        BenchmarkProgress, HealthResponse, KillResponse, KilledProcess, RemoveResponse,
+        UnkilledProcess, Verdict,
+    },
     types::{
-        DriveUsage, EndCause, Holder, JobClass, JobProfile, Lease, LeaseId, LeaseKind, LeaseState,
-        NoiseReport, ResourceUsage, SessionKey,
+        BoundProcess, DriveUsage, EndCause, Holder, JobClass, JobProfile, Lease, LeaseBinding,
+        LeaseId, LeaseKind, LeaseState, NoiseReport, ResourceUsage, SessionKey,
     },
     ui::{
         ActiveJob, CpuMeter, GpuMeter, JobProcess, Meters, Notice, QueuedJob, RamMeter, RecentRun,
@@ -26,6 +29,8 @@ use crate::{
 
 const UPDATE_VAR: &str = "RH_UPDATE_CONTRACT";
 const SCHEMA_FILE: &str = "contract/ui-state.schema.json";
+const KILL_SCHEMA_FILE: &str = "contract/kill-response.schema.json";
+const REMOVE_SCHEMA_FILE: &str = "contract/remove-response.schema.json";
 const CSHARP_FILE: &str = "tray/src/ResourcesHelper.Tray.Core/Contract/UiState.g.cs";
 
 // 2026-10-24 06:52 UTC; every scenario is built relative to it.
@@ -490,20 +495,136 @@ fn scenarios() -> [(&'static str, UiState); 4] {
     ]
 }
 
-fn ui_state_schema() -> Schema {
+/// The lease of a `cargo clippy` the user killed 20 s before [`NOW_MS`], bound to its shell.
+fn killed_lease() -> Lease {
+    Lease {
+        state: LeaseState::Expired,
+        ended_at_ms: Some(NOW_MS - 20_000),
+        end_cause: Some(EndCause::Killed),
+        binding: Some(LeaseBinding {
+            tool_use_id: "toolu_01Kq7ZpX3mV9".into(),
+            bound_at_ms: NOW_MS - 95_000,
+            root: Some(BoundProcess {
+                pid: 31_020,
+                start_time: 1_792_824_625,
+            }),
+        }),
+        ..active_lease(
+            39,
+            holder(APP, 18_240),
+            "cargo clippy --workspace",
+            r"E:\work\app",
+            95_000,
+        )
+    }
+}
+
+fn killed(pid: u32, name: &str) -> KilledProcess {
+    KilledProcess {
+        pid,
+        name: name.into(),
+    }
+}
+
+/// The bound tree terminated with a nested session spared and one process that refused, and a
+/// lease that had no bound tree.
+fn kill_scenarios() -> [(&'static str, KillResponse); 2] {
+    let tree = KillResponse {
+        lease: killed_lease(),
+        terminated: vec![
+            killed(31_020, "bash.exe"),
+            killed(31_024, "bash.exe"),
+            killed(31_032, "cargo.exe"),
+            killed(31_077, "rustc.exe"),
+        ],
+        failed: vec![UnkilledProcess {
+            pid: 31_090,
+            name: "link.exe".into(),
+            reason: "Access is denied. (0x80070005)".into(),
+        }],
+        spared: vec![UnkilledProcess {
+            pid: 31_101,
+            name: "claude.exe".into(),
+            reason: "protected".into(),
+        }],
+        untouched_reason: None,
+    };
+    let untouched = KillResponse {
+        lease: Lease {
+            binding: None,
+            ..killed_lease()
+        },
+        terminated: Vec::new(),
+        failed: Vec::new(),
+        spared: Vec::new(),
+        untouched_reason: Some("the lease has no bound process tree".into()),
+    };
+    [("tree", tree), ("untouched", untouched)]
+}
+
+/// A queued `cargo test` the user removed at [`NOW_MS`].
+fn remove_scenario() -> RemoveResponse {
+    let queued = queued_lease(
+        44,
+        holder(APP, 18_240),
+        "cargo test --workspace",
+        r"E:\work\app",
+        18_000,
+    );
+    RemoveResponse {
+        lease: Lease {
+            state: LeaseState::Expired,
+            ended_at_ms: Some(NOW_MS),
+            end_cause: Some(EndCause::Removed),
+            ..queued
+        },
+    }
+}
+
+fn root_schema<T: schemars::JsonSchema>() -> Schema {
     SchemaSettings::draft07()
         .into_generator()
-        .into_root_schema_for::<UiState>()
+        .into_root_schema_for::<T>()
+}
+
+/// Every root the tray decodes, with its committed schema file; `UiState` first.
+fn contract_schemas() -> [(&'static str, Schema); 3] {
+    [
+        (SCHEMA_FILE, root_schema::<UiState>()),
+        (KILL_SCHEMA_FILE, root_schema::<KillResponse>()),
+        (REMOVE_SCHEMA_FILE, root_schema::<RemoveResponse>()),
+    ]
 }
 
 #[test]
-fn test_ui_state_schema_matches_committed_file() {
-    assert_matches_file(SCHEMA_FILE, &pretty_json(&ui_state_schema()));
+fn test_contract_schemas_match_committed_files() {
+    for (file, schema) in contract_schemas() {
+        assert_matches_file(file, &pretty_json(&schema));
+    }
 }
 
 #[test]
 fn test_csharp_types_match_committed_file() {
-    assert_matches_file(CSHARP_FILE, &csharp::emit(ui_state_schema().as_value()));
+    let schemas = contract_schemas();
+    let roots: Vec<&serde_json::Value> = schemas
+        .iter()
+        .map(|(_, schema)| schema.as_value())
+        .collect();
+    assert_matches_file(CSHARP_FILE, &csharp::emit(&roots));
+}
+
+#[test]
+fn test_response_fixtures_match_committed_files() {
+    for (name, response) in kill_scenarios() {
+        assert_matches_file(
+            &format!("contract/fixtures/kill-response-{name}.json"),
+            &pretty_json(&response),
+        );
+    }
+    assert_matches_file(
+        "contract/fixtures/remove-response.json",
+        &pretty_json(&remove_scenario()),
+    );
 }
 
 #[test]

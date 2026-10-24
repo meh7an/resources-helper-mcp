@@ -9,6 +9,7 @@ mod routes;
 mod sampling;
 pub mod startup;
 mod state;
+mod ui;
 
 use std::{future::Future, sync::Arc, time::Duration};
 

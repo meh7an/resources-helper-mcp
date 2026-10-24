@@ -13,9 +13,11 @@ use rh_client::{
 };
 use rh_core::sampler::{RawProcess, RawSample, Sampler};
 use rh_shared::{
-    api::{AcquireRequest, CanFitRequest, LeaseQuery, ProfileSpec},
+    api::{AcquireRequest, BindRequest, CanFitRequest, LeaseQuery, ProfileSpec},
     config::Config,
-    types::{Holder, JobClass, LeaseKind, LeaseState, MemStats, ResourceUsage, SessionKey},
+    types::{
+        EndCause, Holder, JobClass, LeaseKind, LeaseState, MemStats, ResourceUsage, SessionKey,
+    },
 };
 use rhd::{DaemonOptions, Maintenance, db::open_pool};
 use tempfile::TempDir;
@@ -201,6 +203,46 @@ async fn test_client_lease_lifecycle() {
     assert_eq!(released.lease.state, LeaseState::Released);
     assert_eq!(released.noise, None);
     assert!(client.leases(&mine).await.unwrap().is_empty());
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_client_binds_kills_removes_and_delivers_notices() {
+    let daemon = Daemon::start().await;
+    let client = daemon.client();
+    let session = holder().session;
+
+    let active = client.acquire(&build_request(0)).await.unwrap().lease;
+    assert_eq!(active.state, LeaseState::Active);
+    let report = BindRequest {
+        tool_use_id: "toolu_01Client".into(),
+        command: Some("cargo build".into()),
+    };
+    client.bind(active.id, &session, &report).await.unwrap();
+    let queued = client.acquire(&build_request(0)).await.unwrap().lease;
+    assert_eq!(queued.state, LeaseState::Queued);
+
+    let removed = client.remove(queued.id).await.unwrap();
+    assert_eq!(removed.lease.end_cause, Some(EndCause::Removed));
+    // No sample has shown the command's process, so nothing is terminated.
+    let killed = client.kill(active.id).await.unwrap();
+    assert_eq!(killed.lease.end_cause, Some(EndCause::Killed));
+    assert!(killed.terminated.is_empty());
+    assert!(killed.untouched_reason.is_some());
+
+    let ids: Vec<_> = client
+        .notices(&session)
+        .await
+        .unwrap()
+        .iter()
+        .map(|notice| notice.lease_id)
+        .collect();
+    assert_eq!(ids, [active.id, queued.id]);
+    assert!(client.mark_delivered(active.id, &session).await.unwrap());
+    assert!(!client.mark_delivered(active.id, &session).await.unwrap());
+    let state = client.ui_state().await.unwrap();
+    assert_eq!(state.service.pid, std::process::id());
+    assert_eq!(state.notices.len(), 2);
     daemon.stop().await;
 }
 

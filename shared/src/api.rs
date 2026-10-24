@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::{
-    Holder, JobClass, JobProfile, JobRun, Lease, LeaseKind, LeaseState, NoiseReport, SessionKey,
-    SessionUsage,
+use crate::{
+    types::{
+        Holder, JobClass, JobProfile, JobRun, Lease, LeaseKind, LeaseState, NoiseReport,
+        SessionKey, SessionUsage,
+    },
+    ui::Notice,
 };
 
 /// Response of `GET /health`.
@@ -134,10 +137,11 @@ pub struct WaitRequest {
     pub wait_timeout_secs: u64,
 }
 
-/// Query string of `POST /leases/{id}/heartbeat`, `POST /leases/{id}/wait`, and
-/// `DELETE /leases/{id}`.
+/// Query string of `POST /leases/{id}/heartbeat`, `POST /leases/{id}/wait`,
+/// `POST /leases/{id}/bind`, `DELETE /leases/{id}`, `GET /notices`, and
+/// `POST /notices/{id}/delivered`.
 ///
-/// The daemon refuses either call when the lease belongs to another session.
+/// The daemon refuses a lease or notice call when the lease belongs to another session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseOwner {
     /// Session that claims to own the lease.
@@ -162,6 +166,78 @@ pub struct ReleaseResponse {
     /// lease carries it, and only when at least one sample was taken during the lease.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub noise: Option<NoiseReport>,
+}
+
+/// Response of `POST /leases/{id}/kill`.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KillResponse {
+    /// The lease, ended with cause `killed`.
+    pub lease: Lease,
+    /// Processes terminated, root first.
+    pub terminated: Vec<KilledProcess>,
+    /// Processes that could not be terminated, with what the OS said.
+    pub failed: Vec<UnkilledProcess>,
+    /// Processes in the tree left running on purpose, each with everything below it.
+    pub spared: Vec<UnkilledProcess>,
+    /// Why no process was terminated: the lease had no bound process tree, or its command had
+    /// already ended. The lease ended anyway. `None` when the bound tree was killed.
+    pub untouched_reason: Option<String>,
+}
+
+/// A process a kill terminated.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KilledProcess {
+    /// Process ID.
+    pub pid: u32,
+    /// Executable name, for example `cargo.exe`.
+    pub name: String,
+}
+
+/// A process in a killed tree that is still running.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnkilledProcess {
+    /// Process ID.
+    pub pid: u32,
+    /// Executable name, for example `claude.exe`.
+    pub name: String,
+    /// Why it is still running.
+    pub reason: String,
+}
+
+/// Response of `POST /leases/{id}/remove`.
+#[cfg_attr(any(feature = "schema", test), derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoveResponse {
+    /// The lease, ended with cause `removed` before it started.
+    pub lease: Lease,
+}
+
+/// Body of `POST /leases/{id}/bind`: the PreToolUse hook let a command run under the lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindRequest {
+    /// Claude Code's ID for the tool call that runs the command.
+    pub tool_use_id: String,
+    /// The command as the hook saw it, for the log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// Response of `GET /notices`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticesResponse {
+    /// Kills and removals the session has not been told about yet, oldest first.
+    pub notices: Vec<Notice>,
+}
+
+/// Response of `POST /notices/{id}/delivered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveredResponse {
+    /// `true` when this call recorded the delivery; `false` when an earlier one already had,
+    /// so the session must not be told again.
+    pub delivered: bool,
 }
 
 /// Query string of `GET /leases`. Each filter is optional; an empty query lists every lease.
@@ -472,6 +548,62 @@ mod tests {
             limit: Some(10),
         });
         assert_json_round_trip(&HistoryRunsResponse { runs: Vec::new() });
+    }
+
+    #[test]
+    fn test_kill_and_remove_responses_json_round_trip_preserve_every_field() {
+        assert_json_round_trip(&KillResponse {
+            lease: sample_lease(),
+            terminated: vec![KilledProcess {
+                pid: 30_112,
+                name: "bash.exe".into(),
+            }],
+            failed: vec![UnkilledProcess {
+                pid: 30_140,
+                name: "cargo.exe".into(),
+                reason: "Access is denied.".into(),
+            }],
+            spared: vec![UnkilledProcess {
+                pid: 30_150,
+                name: "claude.exe".into(),
+                reason: "protected".into(),
+            }],
+            untouched_reason: None,
+        });
+        let untouched = KillResponse {
+            lease: sample_lease(),
+            terminated: Vec::new(),
+            failed: Vec::new(),
+            spared: Vec::new(),
+            untouched_reason: Some("the lease has no bound process tree".into()),
+        };
+        assert_json_round_trip(&untouched);
+        assert_json_round_trip(&RemoveResponse {
+            lease: sample_lease(),
+        });
+    }
+
+    #[test]
+    fn test_bind_request_without_command_omits_it() {
+        let request = BindRequest {
+            tool_use_id: "toolu_01AbC".into(),
+            command: None,
+        };
+        assert_json_round_trip(&request);
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value, serde_json::json!({ "tool_use_id": "toolu_01AbC" }));
+        assert_json_round_trip(&BindRequest {
+            command: Some("cargo build".into()),
+            ..request
+        });
+    }
+
+    #[test]
+    fn test_notice_dtos_json_round_trip_preserve_every_field() {
+        assert_json_round_trip(&NoticesResponse {
+            notices: Vec::new(),
+        });
+        assert_json_round_trip(&DeliveredResponse { delivered: true });
     }
 
     #[test]

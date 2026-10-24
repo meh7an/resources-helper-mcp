@@ -15,11 +15,20 @@ public sealed class ContractFixtureTests
 
     // Production ignores unknown members, as serde does; in a fixture one would mean the
     // generated types miss a field.
-    private static readonly JsonTypeInfo<UiState> NoUnknownMembers =
-        (JsonTypeInfo<UiState>)new JsonSerializerOptions(ContractJsonContext.Default.Options)
+    private static readonly JsonSerializerOptions NoUnknownMembers =
+        new(ContractJsonContext.Default.Options)
         {
             UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
-        }.GetTypeInfo(typeof(UiState));
+        };
+
+    // Every fixture file names its root type by its prefix.
+    private static readonly IReadOnlyDictionary<string, Type> FixtureRoots =
+        new Dictionary<string, Type>(StringComparer.Ordinal)
+        {
+            ["ui-state-"] = typeof(UiState),
+            ["kill-response-"] = typeof(KillResponse),
+            ["remove-response"] = typeof(RemoveResponse),
+        };
 
     public static IEnumerable<object[]> FixtureFiles =>
         Directory.GetFiles(FixtureDirectory, "*.json")
@@ -31,8 +40,41 @@ public sealed class ContractFixtureTests
     public void EveryFixtureDecodesWithoutUnknownMembers(string fileName)
     {
         var json = File.ReadAllText(Path.Combine(FixtureDirectory, fileName));
+        var root = FixtureRoots.Single(
+            pair => fileName.StartsWith(pair.Key, StringComparison.Ordinal));
 
-        Decode(json, NoUnknownMembers);
+        var decoded = JsonSerializer.Deserialize(json, NoUnknownMembers.GetTypeInfo(root.Value));
+
+        Assert.IsInstanceOfType(decoded, root.Value);
+    }
+
+    [TestMethod]
+    public void KillFixturesKeepTheTreeAndTheUntouchedReason()
+    {
+        var tree = DecodeResponse("kill-response-tree", ContractJsonContext.Default.KillResponse);
+        var untouched = DecodeResponse(
+            "kill-response-untouched", ContractJsonContext.Default.KillResponse);
+
+        Assert.AreEqual(EndCause.Killed, tree.Lease.EndCause);
+        Assert.AreEqual(LeaseState.Expired, tree.Lease.State);
+        Assert.AreEqual(31_020U, tree.Lease.Binding?.Root?.Pid);
+        Assert.HasCount(4, tree.Terminated);
+        Assert.AreEqual("link.exe", tree.Failed[0].Name);
+        Assert.AreEqual("protected", tree.Spared[0].Reason);
+        Assert.IsNull(tree.UntouchedReason);
+        Assert.IsEmpty(untouched.Terminated);
+        Assert.IsNull(untouched.Lease.Binding);
+        Assert.IsNotNull(untouched.UntouchedReason);
+    }
+
+    [TestMethod]
+    public void RemoveFixtureEndsTheQueuedLease()
+    {
+        var removed = DecodeResponse("remove-response", ContractJsonContext.Default.RemoveResponse);
+
+        Assert.AreEqual(EndCause.Removed, removed.Lease.EndCause);
+        Assert.IsNull(removed.Lease.GrantedAtMs);
+        Assert.IsNotNull(removed.Lease.EndedAtMs);
     }
 
     [TestMethod]
@@ -175,11 +217,16 @@ public sealed class ContractFixtureTests
     private static UiState DecodeFixture(string scenario) =>
         Decode(ReadFixture(scenario), ContractJsonContext.Default.UiState);
 
-    private static UiState Decode(string json, JsonTypeInfo<UiState> typeInfo)
+    private static T DecodeResponse<T>(string fixture, JsonTypeInfo<T> typeInfo)
+        where T : class =>
+        Decode(File.ReadAllText(Path.Combine(FixtureDirectory, $"{fixture}.json")), typeInfo);
+
+    private static T Decode<T>(string json, JsonTypeInfo<T> typeInfo)
+        where T : class
     {
-        var state = JsonSerializer.Deserialize(json, typeInfo);
-        Assert.IsNotNull(state);
-        return state;
+        var decoded = JsonSerializer.Deserialize(json, typeInfo);
+        Assert.IsNotNull(decoded);
+        return decoded;
     }
 
     private static void AssertRejected(JsonObject root) =>

@@ -13,28 +13,32 @@ use axum::{
 };
 use rh_core::{
     history::{self, ESTIMATE_RUNS, Estimate},
-    ledger::{LedgerError, Transition},
+    kill::{KillPlan, KillRefusal, KillReport, Protected, SpareReason},
+    ledger::{Ledger, LedgerError, Transition},
     meter::MeteredRun,
 };
 use rh_shared::{
     api::{
-        AcquireRequest, AcquireResponse, CanFitRequest, HealthResponse, HeartbeatResponse,
-        HistoryResponse, HistoryRunsQuery, HistoryRunsResponse, LeaseOwner, LeaseQuery,
-        LeasesResponse, ProfileSpec, RegisterSessionRequest, ReleaseResponse, SessionsResponse,
-        Verdict, WaitRequest,
+        AcquireRequest, AcquireResponse, BindRequest, CanFitRequest, DeliveredResponse,
+        HealthResponse, HeartbeatResponse, HistoryResponse, HistoryRunsQuery, HistoryRunsResponse,
+        KillResponse, KilledProcess, LeaseOwner, LeaseQuery, LeasesResponse, NoticesResponse,
+        ProfileSpec, RegisterSessionRequest, ReleaseResponse, RemoveResponse, SessionsResponse,
+        UnkilledProcess, Verdict, WaitRequest,
     },
     config::Config,
     types::{
-        EndCause, JobClass, JobProfile, JobRun, Lease, LeaseId, LeaseKind, LeaseState, SessionKey,
-        Snapshot,
+        EndCause, JobClass, JobProfile, JobRun, Lease, LeaseBinding, LeaseId, LeaseKind,
+        LeaseState, SessionKey, Snapshot,
     },
+    ui::UiState,
 };
 use tokio::sync::watch;
 
 use crate::{
     db::repo::{self, LeaseDraft},
     error::AppError,
-    state::{AppState, now_ms},
+    state::{AppState, Latest, Shared, now_ms},
+    ui,
 };
 
 // Longer waits risk client and proxy timeouts; the caller can heartbeat and ask again.
@@ -58,6 +62,12 @@ pub fn router(state: AppState) -> Router {
         .route("/leases/{id}", delete(release))
         .route("/leases/{id}/heartbeat", post(heartbeat))
         .route("/leases/{id}/wait", post(wait))
+        .route("/leases/{id}/bind", post(bind))
+        .route("/leases/{id}/kill", post(kill))
+        .route("/leases/{id}/remove", post(remove))
+        .route("/notices", get(notices))
+        .route("/notices/{id}/delivered", post(notice_delivered))
+        .route("/ui/state", get(ui_state))
         .route("/sessions", get(sessions).post(register_session))
         .route("/history", get(job_history))
         .route("/history/runs", get(history_runs))
@@ -84,12 +94,21 @@ async fn require_token(
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    Json(HealthResponse {
+    Json(health_of(&state))
+}
+
+fn health_of(state: &Shared) -> HealthResponse {
+    HealthResponse {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         pid: std::process::id(),
         uptime_secs: state.started.elapsed().as_secs(),
         config_error: state.config_error(),
-    })
+    }
+}
+
+async fn ui_state(State(state): State<AppState>) -> Result<Json<UiState>, AppError> {
+    let service = health_of(&state);
+    Ok(Json(ui::ui_state(&state, service).await?))
 }
 
 /// Stops the daemon gracefully after this response; Windows has no signal another process
@@ -116,7 +135,7 @@ async fn register_session(
     State(state): State<AppState>,
     Json(request): Json<RegisterSessionRequest>,
 ) -> StatusCode {
-    state.register(request.holder);
+    state.connect(request.holder).await;
     StatusCode::NO_CONTENT
 }
 
@@ -208,7 +227,7 @@ async fn acquire(
     let (declared, class) = resolve_profile(&state.settings().config, &request.profile)?;
     let cwd = request.cwd.unwrap_or_default();
     let estimate = estimate(&state, declared, &request.label, &cwd).await?;
-    state.register(request.holder.clone());
+    state.connect(request.holder.clone()).await;
     let session = request.holder.session.clone();
     let now = now_ms();
     let ttl_ms = i64::try_from(state.heartbeat_ttl().as_millis()).unwrap_or(i64::MAX);
@@ -381,17 +400,280 @@ async fn release(
 
     let noise = finished.as_ref().and_then(|job| job.noise);
     if let Some(job) = finished {
-        // The release itself succeeded; losing the history row must not hide the noise
-        // report from the holder.
-        if let Err(error) = state
-            .with_db(move |conn| repo::insert_job_run(conn, &job))
-            .await
-        {
-            tracing::error!(lease = id.0, "storing the job run failed: {error:#}");
-        }
+        store_job_run(&state, job).await;
     }
     let lease = stored_lease(&state, id, &owner.session).await?;
     Ok(Json(ReleaseResponse { lease, noise }))
+}
+
+/// Records that the PreToolUse hook let a command run under an active lease. The command's
+/// process tree is found on later samples.
+async fn bind(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(owner): Query<LeaseOwner>,
+    Json(request): Json<BindRequest>,
+) -> Result<StatusCode, AppError> {
+    if request.tool_use_id.trim().is_empty() {
+        return Err(AppError::Validation(
+            "tool_use_id must not be empty".to_owned(),
+        ));
+    }
+    let id = LeaseId(id);
+    let binding = LeaseBinding {
+        tool_use_id: request.tool_use_id,
+        bound_at_ms: now_ms(),
+        root: None,
+    };
+    let tool_use_id = binding.tool_use_id.clone();
+    let mut ledger = state.ledger.lock().await;
+    match ledger.bind(id, &owner.session, binding.clone()) {
+        Ok(_) => {}
+        Err(LedgerError::NotFound(_)) => {
+            drop(ledger);
+            stored_lease(&state, id, &owner.session).await?;
+            return Err(untracked(&state, id).await);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    // Written under the ledger lock, so a sample's rebind cannot overwrite a newer report.
+    state
+        .with_db(move |conn| repo::bind_lease(conn, id, &binding))
+        .await?;
+    drop(ledger);
+    tracing::info!(
+        lease = id.0,
+        tool_use_id,
+        command = request.command.as_deref().unwrap_or_default(),
+        "command reported"
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ends an active lease as killed, whichever session holds it, then terminates its bound
+/// process tree. The lease ends first, so the hook that sees the command fail already finds
+/// the notice. A lease without a running bound tree ends anyway, with nothing terminated.
+async fn kill(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<KillResponse>, AppError> {
+    let id = LeaseId(id);
+    let latest = state.latest().ok_or(AppError::Unavailable)?;
+    let now = now_ms();
+    let mut ledger = state.ledger.lock().await;
+    let Some(lease) = tracked(&ledger, id).cloned() else {
+        drop(ledger);
+        return Err(untracked(&state, id).await);
+    };
+    if lease.state != LeaseState::Active {
+        return Err(AppError::Conflict(format!(
+            "lease {} is queued; remove it instead",
+            id.0
+        )));
+    }
+    let plan = match plan_kill(&lease, &ledger, &latest) {
+        Ok(plan) => Ok(plan),
+        Err(refusal @ (KillRefusal::NotBound | KillRefusal::RootGone { .. })) => {
+            Err(refusal.to_string())
+        }
+        Err(refusal) => {
+            return Err(AppError::Conflict(format!(
+                "lease {} was not killed: {refusal}",
+                id.0
+            )));
+        }
+    };
+
+    let released = ledger.end(id, EndCause::Killed, now)?;
+    state
+        .with_db(move |conn| repo::end_lease(conn, id, EndCause::Killed, now, "killed by the user"))
+        .await?;
+    state.notify_changes();
+    // The freed room may let queued leases start right away.
+    state.tick(&mut ledger).await?;
+    drop(ledger);
+    if let Some(run) = &released.run {
+        store_job_run(
+            &state,
+            job_run(&state, &released.lease, run, EndCause::Killed, now),
+        )
+        .await;
+    }
+
+    let (report, untouched_reason) = match plan {
+        Ok(mut plan) => {
+            let report = tokio::task::spawn_blocking(move || rh_sampler::kill_tree(&mut plan))
+                .await
+                .map_err(|error| anyhow!("the kill task failed: {error}"))?;
+            (report, None)
+        }
+        Err(reason) => (KillReport::default(), Some(reason)),
+    };
+    tracing::info!(
+        lease = id.0,
+        terminated = report.terminated.len(),
+        failed = report.failed.len(),
+        spared = report.spared.len(),
+        untouched = untouched_reason.as_deref().unwrap_or_default(),
+        "lease killed by the user"
+    );
+    let lease = ended_lease(&state, id).await?;
+    Ok(Json(KillResponse {
+        lease,
+        terminated: report
+            .terminated
+            .iter()
+            .map(|target| KilledProcess {
+                pid: target.pid,
+                name: target.name.clone(),
+            })
+            .collect(),
+        failed: report
+            .failed
+            .iter()
+            .map(|failure| UnkilledProcess {
+                pid: failure.target.pid,
+                name: failure.target.name.clone(),
+                reason: failure.error.clone(),
+            })
+            .collect(),
+        spared: report
+            .spared
+            .iter()
+            .map(|spared| UnkilledProcess {
+                pid: spared.pid,
+                name: spared.name.clone(),
+                reason: spare_reason(spared.reason).to_owned(),
+            })
+            .collect(),
+        untouched_reason,
+    }))
+}
+
+/// The kill of `lease`'s bound tree as the latest sample shows it, sparing every session the
+/// daemon knows of and the daemon itself.
+fn plan_kill(lease: &Lease, ledger: &Ledger, latest: &Latest) -> Result<KillPlan, KillRefusal> {
+    let binding = lease.binding.as_ref().ok_or(KillRefusal::NotBound)?;
+    let others = ledger
+        .leases()
+        .iter()
+        .map(|other| &other.holder)
+        .chain(latest.snapshot.sessions.iter().map(|usage| &usage.holder));
+    let protected = Protected::new(&latest.processes, &lease.holder, others, std::process::id());
+    KillPlan::new(binding, &latest.processes, protected)
+}
+
+fn spare_reason(reason: SpareReason) -> &'static str {
+    match reason {
+        SpareReason::Protected => "protected",
+        SpareReason::OlderThanReport => "started before the command was reported",
+        _ => "left running",
+    }
+}
+
+/// Ends a queued lease as removed, whichever session holds it. Open acquire and wait requests
+/// on it answer at once.
+async fn remove(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<RemoveResponse>, AppError> {
+    let id = LeaseId(id);
+    let now = now_ms();
+    let mut ledger = state.ledger.lock().await;
+    let Some(lease_state) = tracked(&ledger, id).map(|lease| lease.state) else {
+        drop(ledger);
+        return Err(untracked(&state, id).await);
+    };
+    if lease_state != LeaseState::Queued {
+        return Err(AppError::Conflict(format!(
+            "lease {} is active; kill it instead",
+            id.0
+        )));
+    }
+    ledger.end(id, EndCause::Removed, now)?;
+    state
+        .with_db(move |conn| {
+            repo::end_lease(
+                conn,
+                id,
+                EndCause::Removed,
+                now,
+                "removed from the queue by the user",
+            )
+        })
+        .await?;
+    tracing::info!(lease = id.0, "lease removed from the queue by the user");
+    state.notify_changes();
+    // The removed lease may have held up the ones behind it.
+    state.tick(&mut ledger).await?;
+    drop(ledger);
+    let lease = ended_lease(&state, id).await?;
+    Ok(Json(RemoveResponse { lease }))
+}
+
+/// Kills and removals the session has not been told about yet, oldest first.
+async fn notices(
+    State(state): State<AppState>,
+    Query(owner): Query<LeaseOwner>,
+) -> Result<Json<NoticesResponse>, AppError> {
+    let notices = state
+        .with_db(move |conn| repo::undelivered_notices(conn, &owner.session))
+        .await?;
+    Ok(Json(NoticesResponse { notices }))
+}
+
+/// Records that the holder's session was told about the kill or removal of lease `id`.
+async fn notice_delivered(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(owner): Query<LeaseOwner>,
+) -> Result<Json<DeliveredResponse>, AppError> {
+    let id = LeaseId(id);
+    stored_lease(&state, id, &owner.session).await?;
+    let now = now_ms();
+    let delivered = state
+        .with_db(move |conn| repo::mark_notice_delivered(conn, id, now))
+        .await?;
+    Ok(Json(DeliveredResponse { delivered }))
+}
+
+/// Stores a finished run. The lease already ended; losing the history row must not fail the
+/// request that ended it, nor hide a benchmark's noise report from its holder.
+async fn store_job_run(state: &AppState, job: JobRun) {
+    let lease = job.lease_id.map_or(0, |id| id.0);
+    if let Err(error) = state
+        .with_db(move |conn| repo::insert_job_run(conn, &job))
+        .await
+    {
+        tracing::error!(lease, "storing the job run failed: {error:#}");
+    }
+}
+
+fn tracked(ledger: &Ledger, id: LeaseId) -> Option<&Lease> {
+    ledger.leases().iter().find(|lease| lease.id == id)
+}
+
+/// Why a request on lease `id` fails once the ledger no longer tracks it: it ended, or it
+/// never existed.
+async fn untracked(state: &AppState, id: LeaseId) -> AppError {
+    match state.with_db(move |conn| repo::get_lease(conn, id)).await {
+        Ok(Some(lease)) => AppError::Conflict(format!(
+            "lease {} has already ended ({})",
+            id.0,
+            lease
+                .end_cause
+                .map_or(lease.state.as_str(), EndCause::as_str)
+        )),
+        Ok(None) => AppError::NotFound(format!("lease {} does not exist", id.0)),
+        Err(error) => error.into(),
+    }
+}
+
+async fn ended_lease(state: &AppState, id: LeaseId) -> Result<Lease, AppError> {
+    Ok(state
+        .with_db(move |conn| repo::get_lease(conn, id))
+        .await?
+        .ok_or_else(|| anyhow!("lease {} vanished from the database", id.0))?)
 }
 
 /// The history row of a lease that ran until its holder released it or the user killed it;
@@ -455,10 +737,16 @@ async fn lease_verdict(state: &AppState, lease: &Lease) -> Verdict {
             .and_then(|latest| ledger.verdict_for(lease.id, &latest.snapshot, now_ms()))
     };
     explained.unwrap_or_else(|| {
-        let reason = if lease.state == LeaseState::Queued {
-            "waiting for the first machine sample".to_owned()
-        } else {
-            format!("lease is {}", lease.state.as_str())
+        let reason = match (lease.state, lease.end_cause) {
+            (LeaseState::Queued, _) => "waiting for the first machine sample".to_owned(),
+            (_, Some(EndCause::Removed)) => {
+                "the user removed this request from the queue in Resources Helper; it did not run"
+                    .to_owned()
+            }
+            (_, Some(EndCause::Killed)) => {
+                "the user stopped this job in Resources Helper".to_owned()
+            }
+            _ => format!("lease is {}", lease.state.as_str()),
         };
         Verdict {
             fits: false,

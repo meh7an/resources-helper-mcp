@@ -21,6 +21,10 @@ pub enum AppError {
     /// The lease belongs to another session.
     #[error("{0}")]
     Forbidden(String),
+    /// The lease is in a state that does not allow the request, for example a kill of a
+    /// queued lease.
+    #[error("{0}")]
+    Conflict(String),
     /// The request is well-formed but its values are unusable.
     #[error("{0}")]
     Validation(String),
@@ -37,6 +41,7 @@ impl From<LedgerError> for AppError {
         match error {
             LedgerError::NotFound(_) => Self::NotFound(error.to_string()),
             LedgerError::NotOwner(_) => Self::Forbidden(error.to_string()),
+            LedgerError::NotActive(_) => Self::Conflict(error.to_string()),
             _ => Self::Internal(error.into()),
         }
     }
@@ -48,6 +53,7 @@ impl IntoResponse for AppError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(error) => {

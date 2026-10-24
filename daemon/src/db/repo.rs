@@ -122,6 +122,25 @@ pub fn list_leases(conn: &mut SqliteConnection, query: &LeaseQuery) -> anyhow::R
         .collect()
 }
 
+/// The working directory of the newest lease of `session` that named one, which names the
+/// session's project.
+///
+/// # Errors
+///
+/// Returns an error when the query fails.
+pub fn latest_cwd(
+    conn: &mut SqliteConnection,
+    session: &SessionKey,
+) -> anyhow::Result<Option<String>> {
+    Ok(leases::table
+        .filter(leases::session_id.eq(session.0.as_str()))
+        .filter(leases::cwd.ne(""))
+        .order(leases::id.desc())
+        .select(leases::cwd)
+        .first(conn)
+        .optional()?)
+}
+
 /// Moves a lease to `to_state` and records the transition. Entering `Active` sets
 /// `granted_at_ms`; entering `Released` or `Expired` sets `ended_at_ms` and the cause of the
 /// same name. [`end_lease`] records the other causes.
@@ -608,6 +627,37 @@ mod tests {
                 to_state: LeaseState::Queued,
                 reason: "requested".into(),
             }]
+        );
+    }
+
+    #[test]
+    fn test_latest_cwd_skips_leases_without_one_and_other_sessions() {
+        let mut conn = memory_conn();
+        let session = sample_draft("s1", 0).holder.session;
+        assert_eq!(latest_cwd(&mut conn, &session).unwrap(), None);
+
+        let older = LeaseDraft {
+            cwd: r"E:\work\old".into(),
+            ..sample_draft("s1", 1_000)
+        };
+        let newer = LeaseDraft {
+            cwd: r"E:\work\new".into(),
+            ..sample_draft("s1", 2_000)
+        };
+        let without = LeaseDraft {
+            cwd: String::new(),
+            ..sample_draft("s1", 3_000)
+        };
+        let other = LeaseDraft {
+            cwd: r"E:\work\other".into(),
+            ..sample_draft("s2", 4_000)
+        };
+        for draft in [older, newer, without, other] {
+            insert_lease(&mut conn, &draft).unwrap();
+        }
+        assert_eq!(
+            latest_cwd(&mut conn, &session).unwrap().as_deref(),
+            Some(r"E:\work\new")
         );
     }
 

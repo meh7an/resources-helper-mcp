@@ -1,0 +1,68 @@
+{
+  "lease": {
+    "id": 39,
+    "holder": {
+      "session": "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02",
+      "pid": 18240,
+      "pid_start_time": 1792820000
+    },
+    "kind": "normal",
+    "state": "expired",
+    "class": "cpu_heavy",
+    "profile": {
+      "cores": 8.0,
+      "ram_mb": 4096,
+      "gpu_pct": 0.0,
+      "vram_mb": 0,
+      "est_secs": 300
+    },
+    "label": "cargo clippy --workspace",
+    "cwd": "E:\\work\\app",
+    "requested_at_ms": 1792824623500,
+    "granted_at_ms": 1792824625000,
+    "ended_at_ms": 1792824700000,
+    "expires_at_ms": 1792824765000,
+    "end_cause": "killed",
+    "binding": {
+      "tool_use_id": "toolu_01Kq7ZpX3mV9",
+      "bound_at_ms": 1792824625000,
+      "root": {
+        "pid": 31020,
+        "start_time": 1792824625
+      }
+    }
+  },
+  "terminated": [
+    {
+      "pid": 31020,
+      "name": "bash.exe"
+    },
+    {
+      "pid": 31024,
+      "name": "bash.exe"
+    },
+    {
+      "pid": 31032,
+      "name": "cargo.exe"
+    },
+    {
+      "pid": 31077,
+      "name": "rustc.exe"
+    }
+  ],
+  "failed": [
+    {
+      "pid": 31090,
+      "name": "link.exe",
+      "reason": "Access is denied. (0x80070005)"
+    }
+  ],
+  "spared": [
+    {
+      "pid": 31101,
+      "name": "claude.exe",
+      "reason": "protected"
+    }
+  ],
+  "untouched_reason": null
+}

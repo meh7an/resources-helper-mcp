@@ -11,6 +11,7 @@ mod probe;
 mod registration;
 mod sample;
 mod status;
+mod stop;
 
 /// Inspect machine usage and leases, control the daemon, and run the Claude Code hook.
 #[derive(Debug, Parser)]
@@ -29,6 +30,18 @@ enum Command {
         /// Show the most recent leases in any state instead.
         #[arg(long)]
         all: bool,
+    },
+    /// Stop an active lease's command and its process tree, whichever session holds it. The
+    /// session is told the user stopped it.
+    Kill {
+        /// The lease ID, as `rh leases` prints it.
+        id: i64,
+    },
+    /// Remove a queued lease before it starts, whichever session asked for it. The session
+    /// does not run the command.
+    Remove {
+        /// The lease ID, as `rh leases` prints it.
+        id: i64,
     },
     /// Print the heavy-command rules and class profiles in effect, as Markdown.
     Classes,
@@ -100,6 +113,8 @@ fn main() -> ExitCode {
     let result = match args.command {
         Command::Status => status::status(),
         Command::Leases { all } => status::leases(all),
+        Command::Kill { id } => stop::kill(id),
+        Command::Remove { id } => stop::remove(id),
         Command::Classes => classes::classes(),
         Command::History { fingerprint, limit } => history::history(fingerprint.as_deref(), limit),
         Command::Daemon { action } => match action {

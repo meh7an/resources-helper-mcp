@@ -1229,6 +1229,7 @@ dependencies = [
  "rh-core",
  "rh-sampler",
  "rh-shared",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

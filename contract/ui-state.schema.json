@@ -483,7 +483,7 @@
       "type": "object",
       "properties": {
         "bound": {
-          "description": "Whether this is the root of the command's bound process tree, the only tree a kill\nends. `false` means it is the session's busiest process, shown for display only.",
+          "description": "Whether it belongs to the command's bound process tree, the only tree a kill ends: its\nbusiest process, or its root while the tree is idle. `false` means it is the session's\nbusiest process, shown for display only.",
           "type": "boolean"
         },
         "exe": {

@@ -12,7 +12,8 @@ use rh_shared::{
     api::{BenchmarkProgress, Verdict},
     config::Config,
     types::{
-        EndCause, Holder, JobProfile, Lease, LeaseId, LeaseKind, LeaseState, SessionKey, Snapshot,
+        EndCause, Holder, JobProfile, Lease, LeaseBinding, LeaseId, LeaseKind, LeaseState,
+        SessionKey, Snapshot,
     },
 };
 
@@ -83,6 +84,9 @@ pub enum LedgerError {
     /// Only queued leases can be enqueued.
     #[error("lease {} is not queued", .0.0)]
     NotQueued(LeaseId),
+    /// Only active leases run commands.
+    #[error("lease {} is not active", .0.0)]
+    NotActive(LeaseId),
     /// A lease with this ID is already tracked.
     #[error("lease {} is already tracked", .0.0)]
     AlreadyTracked(LeaseId),
@@ -229,6 +233,27 @@ impl Ledger {
         let index = self.owned_index(id, session)?;
         let lease = &mut self.leases[index];
         lease.expires_at_ms = now_ms.saturating_add(self.settings.heartbeat_ttl_ms);
+        Ok(lease)
+    }
+
+    /// Records the command an active lease covers, replacing the binding of an earlier
+    /// command, or the root found for it.
+    ///
+    /// # Errors
+    ///
+    /// [`LedgerError::NotFound`], [`LedgerError::NotOwner`], or [`LedgerError::NotActive`].
+    pub fn bind(
+        &mut self,
+        id: LeaseId,
+        session: &SessionKey,
+        binding: LeaseBinding,
+    ) -> Result<&Lease, LedgerError> {
+        let index = self.owned_index(id, session)?;
+        let lease = &mut self.leases[index];
+        if lease.state != LeaseState::Active {
+            return Err(LedgerError::NotActive(id));
+        }
+        lease.binding = Some(binding);
         Ok(lease)
     }
 
@@ -1114,6 +1139,44 @@ mod tests {
         assert_eq!(
             ledger.end(LeaseId(1), EndCause::Removed, 600).unwrap_err(),
             LedgerError::NotFound(LeaseId(1))
+        );
+    }
+
+    #[test]
+    fn test_bind_replaces_the_binding_of_an_owned_active_lease_only() {
+        let mut ledger = Ledger::new(settings());
+        enqueue(&mut ledger, 1, 8.0, 300, 0);
+        let binding = |tool_use_id: &str| LeaseBinding {
+            tool_use_id: tool_use_id.into(),
+            bound_at_ms: 1_000,
+            root: None,
+        };
+        assert_eq!(
+            ledger
+                .bind(LeaseId(1), &session("s"), binding("first"))
+                .unwrap_err(),
+            LedgerError::NotActive(LeaseId(1))
+        );
+        assert_eq!(tick_seconds(&mut ledger, 0, 0, 0.0), [1]);
+
+        ledger
+            .bind(LeaseId(1), &session("s"), binding("first"))
+            .unwrap();
+        let bound = ledger
+            .bind(LeaseId(1), &session("s"), binding("second"))
+            .unwrap();
+        assert_eq!(bound.binding, Some(binding("second")));
+        assert_eq!(
+            ledger
+                .bind(LeaseId(1), &session("other"), binding("third"))
+                .unwrap_err(),
+            LedgerError::NotOwner(LeaseId(1))
+        );
+        assert_eq!(
+            ledger
+                .bind(LeaseId(9), &session("s"), binding("third"))
+                .unwrap_err(),
+            LedgerError::NotFound(LeaseId(9))
         );
     }
 

@@ -2,11 +2,12 @@
 //! whose machine state each test controls.
 
 use std::{
-    fs,
+    env, fs,
     future::Future,
     path::PathBuf,
-    process,
+    process::{self, Child, Command, Stdio},
     sync::{Arc, Mutex},
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,15 +16,17 @@ use reqwest::{RequestBuilder, Response, StatusCode};
 use rh_core::sampler::{RawProcess, RawSample, Sampler};
 use rh_shared::{
     api::{
-        AcquireRequest, AcquireResponse, BenchmarkProgress, CanFitRequest, HealthResponse,
-        HeartbeatResponse, HistoryResponse, HistoryRunsResponse, LeasesResponse, ProfileSpec,
-        RegisterSessionRequest, ReleaseResponse, SessionsResponse, Verdict, WaitRequest,
+        AcquireRequest, AcquireResponse, BenchmarkProgress, BindRequest, CanFitRequest,
+        DeliveredResponse, HealthResponse, HeartbeatResponse, HistoryResponse, HistoryRunsResponse,
+        KillResponse, LeasesResponse, NoticesResponse, ProfileSpec, RegisterSessionRequest,
+        ReleaseResponse, RemoveResponse, SessionsResponse, Verdict, WaitRequest,
     },
     config::Config,
     types::{
-        Holder, JobClass, JobProfile, Lease, LeaseId, LeaseKind, LeaseState, MemStats,
+        EndCause, Holder, JobClass, JobProfile, Lease, LeaseId, LeaseKind, LeaseState, MemStats,
         ResourceUsage, SessionKey, Snapshot,
     },
+    ui::{Notice, UiState},
 };
 use rhd::{
     DaemonOptions, Maintenance,
@@ -32,6 +35,7 @@ use rhd::{
         repo::{self, LeaseDraft},
     },
 };
+use serde_json::Value;
 use tempfile::TempDir;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
@@ -984,4 +988,420 @@ async fn test_shutdown_route_stops_the_server() {
     let server = daemon.server.take().unwrap();
     let stopped = tokio::time::timeout(Duration::from_secs(5), server).await;
     stopped.unwrap().unwrap().unwrap();
+}
+
+/// Makes the test binary, run as `sleep_helper`, sleep instead of returning at once.
+const HELPER_VAR: &str = "RH_DAEMON_TEST_HELPER";
+
+/// How long a helper lives when nobody kills it, so a failed test leaves nothing behind.
+const HELPER_LIFETIME: Duration = Duration::from_secs(60);
+
+#[test]
+#[ignore = "helper process for the kill test; does nothing without RH_DAEMON_TEST_HELPER"]
+fn sleep_helper() {
+    if env::var_os(HELPER_VAR).is_some() {
+        thread::sleep(HELPER_LIFETIME);
+    }
+}
+
+/// A sleeping copy of this test binary, the only kind of process these tests kill. Dropping it
+/// terminates it if it still runs.
+struct Helper {
+    child: Child,
+    start_time: u64,
+}
+
+impl Helper {
+    fn spawn() -> Self {
+        let child = Command::new(env::current_exe().unwrap())
+            .args(["sleep_helper", "--exact", "--ignored"])
+            .env(HELPER_VAR, "1")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let start_time = rh_sampler::process_table()
+            .get(child.id())
+            .expect("the helper is running")
+            .start_time;
+        Self { child, start_time }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// The helper as a fake-sampler process started by `parent_pid`.
+    fn as_child_of(&self, parent_pid: u32) -> RawProcess {
+        RawProcess {
+            parent_pid: Some(parent_pid),
+            name: helper_name(),
+            ..process(self.pid(), self.start_time)
+        }
+    }
+
+    /// Waits up to 5 s for the helper to exit and returns its exit code.
+    fn exit_code(&mut self) -> Option<i32> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status.code();
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("helper {} is still running", self.pid());
+    }
+}
+
+impl Drop for Helper {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn helper_name() -> String {
+    env::current_exe()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+impl Daemon {
+    async fn bind(&self, id: LeaseId, session: &str, tool_use_id: &str) -> Response {
+        let path = format!("/leases/{}/bind?session={session}", id.0);
+        let request = BindRequest {
+            tool_use_id: tool_use_id.into(),
+            command: Some("cargo build".into()),
+        };
+        send(self.post(&path).json(&request)).await
+    }
+
+    async fn kill(&self, id: LeaseId) -> Response {
+        send(self.post(&format!("/leases/{}/kill", id.0))).await
+    }
+
+    async fn remove(&self, id: LeaseId) -> Response {
+        send(self.post(&format!("/leases/{}/remove", id.0))).await
+    }
+
+    async fn notices(&self, session: &str) -> Vec<Notice> {
+        let response = self.get(&format!("/notices?session={session}")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.json::<NoticesResponse>().await.unwrap().notices
+    }
+
+    async fn deliver(&self, id: LeaseId, session: &str) -> Response {
+        send(self.post(&format!("/notices/{}/delivered?session={session}", id.0))).await
+    }
+
+    async fn ui_state(&self) -> UiState {
+        let response = self.get("/ui/state").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.json().await.unwrap()
+    }
+
+    fn add_process(&self, process: RawProcess) {
+        self.machine.lock().unwrap().processes.push(process);
+    }
+}
+
+#[tokio::test]
+async fn test_kill_terminates_only_the_bound_tree_and_leaves_a_notice() {
+    let daemon = Daemon::start().await;
+    let lease = daemon.acquire_build(alice(), 0).await.lease;
+    let bound = daemon.bind(lease.id, "alice", "toolu_01Kill").await;
+    assert_eq!(bound.status(), StatusCode::NO_CONTENT);
+
+    let mut command = Helper::spawn();
+    daemon.add_process(command.as_child_of(ALICE_PID));
+    eventually("the command's process to be bound", || async {
+        let state = daemon.ui_state().await;
+        state.active[0]
+            .process
+            .as_ref()
+            .is_some_and(|process| process.bound && process.pid == command.pid())
+    })
+    .await;
+    // Started after the binding, so it is another command of the same session.
+    let mut other = Helper::spawn();
+    daemon.add_process(other.as_child_of(ALICE_PID));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let response = daemon.kill(lease.id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let killed: KillResponse = response.json().await.unwrap();
+    let terminated: Vec<u32> = killed
+        .terminated
+        .iter()
+        .map(|process| process.pid)
+        .collect();
+    assert_eq!(terminated, [command.pid()]);
+    assert!(killed.failed.is_empty(), "{killed:?}");
+    assert_eq!(killed.untouched_reason, None);
+    assert_eq!(killed.lease.state, LeaseState::Expired);
+    assert_eq!(killed.lease.end_cause, Some(EndCause::Killed));
+
+    assert_eq!(command.exit_code(), Some(-1));
+    assert!(other.child.try_wait().unwrap().is_none());
+    let notices = daemon.notices("alice").await;
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        (notices[0].lease_id, notices[0].cause),
+        (lease.id, EndCause::Killed)
+    );
+    assert!(daemon.leases("?state=active").await.is_empty());
+    let recent = daemon.ui_state().await.recent;
+    assert_eq!(recent[0].lease_id, Some(lease.id));
+    assert_eq!(recent[0].end_cause, Some(EndCause::Killed));
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_kill_without_a_bound_tree_ends_the_lease_and_terminates_nothing() {
+    let daemon = Daemon::start().await;
+    let lease = daemon.acquire_build(alice(), 0).await.lease;
+
+    let killed: KillResponse = daemon.kill(lease.id).await.json().await.unwrap();
+    assert!(killed.terminated.is_empty());
+    assert_eq!(
+        killed.untouched_reason.as_deref(),
+        Some("the lease has no bound process tree")
+    );
+    assert_eq!(killed.lease.end_cause, Some(EndCause::Killed));
+    assert_eq!(daemon.kill(lease.id).await.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        daemon.kill(LeaseId(404)).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_remove_answers_the_acquire_waiting_on_the_lease() {
+    let daemon = Daemon::start().await;
+    let waiting = open_acquire_wait(&daemon).await;
+    let queued = daemon.leases("?state=queued").await;
+    let id = queued[0].id;
+    let active = daemon.leases("?state=active").await[0].id;
+    assert_eq!(daemon.remove(active).await.status(), StatusCode::CONFLICT);
+    assert_eq!(daemon.kill(id).await.status(), StatusCode::CONFLICT);
+
+    let started = Instant::now();
+    let response = daemon.remove(id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let removed: RemoveResponse = response.json().await.unwrap();
+    assert_eq!(removed.lease.end_cause, Some(EndCause::Removed));
+
+    let answer = tokio::time::timeout(Duration::from_secs(2), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let answer: AcquireResponse = answer.json().await.unwrap();
+    assert_eq!(answer.lease.id, id);
+    assert_eq!(answer.lease.state, LeaseState::Expired);
+    assert_eq!(answer.lease.end_cause, Some(EndCause::Removed));
+    assert!(!answer.verdict.fits);
+    let reasons = answer.verdict.reasons.join(" | ");
+    assert!(
+        reasons.contains("removed this request from the queue"),
+        "{reasons}"
+    );
+
+    let resumed: AcquireResponse = daemon.wait(id, "bob", 30).await.json().await.unwrap();
+    assert_eq!(resumed.lease.end_cause, Some(EndCause::Removed));
+    assert_eq!(daemon.remove(id).await.status(), StatusCode::CONFLICT);
+    assert_eq!(daemon.notices("bob").await[0].cause, EndCause::Removed);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_notice_is_delivered_once_and_only_to_its_session() {
+    let daemon = Daemon::start().await;
+    let lease = daemon.acquire_build(alice(), 0).await.lease;
+    assert_eq!(daemon.kill(lease.id).await.status(), StatusCode::OK);
+    assert!(daemon.notices("bob").await.is_empty());
+    assert_eq!(
+        daemon.deliver(lease.id, "bob").await.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let first: DeliveredResponse = daemon
+        .deliver(lease.id, "alice")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(first.delivered);
+    let again: DeliveredResponse = daemon
+        .deliver(lease.id, "alice")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(!again.delivered);
+    assert!(daemon.notices("alice").await.is_empty());
+    let shown = daemon.ui_state().await.notices;
+    assert_eq!(shown[0].lease_id, lease.id);
+    assert!(shown[0].delivered_at_ms.is_some());
+    assert_eq!(
+        daemon.deliver(LeaseId(404), "alice").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_bind_checks_the_owner_and_the_state() {
+    let daemon = Daemon::start().await;
+    let active = daemon.acquire_build(alice(), 0).await.lease;
+    let queued = daemon.acquire_build(bob(), 0).await.lease;
+
+    let cases = [
+        (active.id, "bob", "toolu_1", StatusCode::FORBIDDEN),
+        (active.id, "alice", " ", StatusCode::UNPROCESSABLE_ENTITY),
+        (queued.id, "bob", "toolu_2", StatusCode::CONFLICT),
+        (LeaseId(404), "alice", "toolu_3", StatusCode::NOT_FOUND),
+        (active.id, "alice", "toolu_4", StatusCode::NO_CONTENT),
+    ];
+    for (id, session, tool_use_id, status) in cases {
+        let response = daemon.bind(id, session, tool_use_id).await;
+        assert_eq!(response.status(), status, "{session} {tool_use_id}");
+    }
+    let stored = repo::get_lease(&mut daemon.db(), active.id)
+        .unwrap()
+        .unwrap();
+    let binding = stored.binding.unwrap();
+    assert_eq!(binding.tool_use_id, "toolu_4");
+    assert_eq!(binding.root, None);
+
+    daemon.release_response(active.id, "alice").await;
+    let ended = daemon.bind(active.id, "alice", "toolu_5").await;
+    assert_eq!(ended.status(), StatusCode::CONFLICT);
+    daemon.stop().await;
+}
+
+/// Fails when `live` has a key `golden` lacks or the other way round, or a value of another
+/// JSON type. A `null` on either side matches anything, and arrays compare their first items.
+fn assert_same_shape(path: &str, live: &Value, golden: &Value) {
+    match (live, golden) {
+        (Value::Null, _) | (_, Value::Null) => {}
+        (Value::Object(live), Value::Object(golden)) => {
+            let live_keys: Vec<&String> = live.keys().collect();
+            let golden_keys: Vec<&String> = golden.keys().collect();
+            assert_eq!(live_keys, golden_keys, "keys of {path}");
+            for (key, value) in live {
+                assert_same_shape(&format!("{path}.{key}"), value, &golden[key]);
+            }
+        }
+        (Value::Array(live), Value::Array(golden)) => {
+            if let (Some(live), Some(golden)) = (live.first(), golden.first()) {
+                assert_same_shape(&format!("{path}[0]"), live, golden);
+            }
+        }
+        (Value::Number(_), Value::Number(_))
+        | (Value::String(_), Value::String(_))
+        | (Value::Bool(_), Value::Bool(_)) => {}
+        _ => panic!("{path} is {live} here but {golden} in the fixture"),
+    }
+}
+
+#[tokio::test]
+async fn test_ui_state_has_the_shape_of_the_busy_fixture() {
+    let daemon = Daemon::start().await;
+    daemon.add_process(RawProcess {
+        parent_pid: Some(ALICE_PID),
+        name: "cargo.exe".into(),
+        exe: Some(r"C:\Users\Mehran\.cargo\bin\cargo.exe".into()),
+        usage: ResourceUsage {
+            cores: 6.0,
+            ram_mb: 900,
+            gpu_pct: 0.0,
+            vram_mb: 0,
+        },
+        ..process(7_001, 300)
+    });
+    let request = AcquireRequest {
+        holder: alice(),
+        profile: ProfileSpec::Class(JobClass::CpuHeavy),
+        kind: LeaseKind::Normal,
+        label: "cargo build --release".into(),
+        cwd: Some(r"E:\work\app".into()),
+        wait_timeout_secs: 0,
+    };
+    let response = send(daemon.post("/leases").json(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    daemon.acquire_build(bob(), 0).await;
+    let removed = daemon.acquire_build(bob(), 0).await.lease;
+    assert_eq!(daemon.remove(removed.id).await.status(), StatusCode::OK);
+    eventually("the session's busiest process", || async {
+        daemon.ui_state().await.active[0].process.is_some()
+    })
+    .await;
+
+    let state = daemon.ui_state().await;
+    assert_eq!(state.service.pid, process::id());
+    assert!(state.first_session_at_ms.is_some());
+    assert_eq!(state.active.len(), 1);
+    let shown = state.active[0].process.as_ref().unwrap();
+    assert_eq!((shown.pid, shown.bound), (7_001, false));
+    assert_eq!(state.queue[0].position, 1);
+    assert!(!state.queue[0].verdict.fits);
+    assert_eq!(state.meters.cpu.reserved_cores, 8.0);
+    assert!(!state.meters.cpu.history_pct.is_empty());
+    assert!(state.meters.cpu.history_pct.len() <= 24);
+    let alice_session = state
+        .sessions
+        .iter()
+        .find(|session| session.session.0 == "alice")
+        .unwrap();
+    assert_eq!(alice_session.cwd.as_deref(), Some(r"E:\work\app"));
+    assert_eq!(state.notices[0].cause, EndCause::Removed);
+
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../contract/fixtures/ui-state-busy.json");
+    let golden: Value = serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+    let live: Value = daemon.get("/ui/state").await.json().await.unwrap();
+    assert_same_shape("ui_state", &live, &golden);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_ui_state_waits_for_the_first_sample_and_needs_the_token() {
+    let daemon = Daemon::start().await;
+    let anonymous = daemon
+        .client
+        .get(daemon.url("/ui/state"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let state = daemon.ui_state().await;
+    assert_eq!(state.first_session_at_ms, None);
+    assert!(state.active.is_empty() && state.queue.is_empty());
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn test_graceful_shutdown_after_the_flyout_routes_takes_milliseconds() {
+    let daemon = Daemon::start().await;
+    let waiting = open_acquire_wait(&daemon).await;
+    daemon.ui_state().await;
+    let queued = daemon.acquire_build(alice(), 0).await.lease;
+    assert_eq!(daemon.remove(queued.id).await.status(), StatusCode::OK);
+    daemon.notices("alice").await;
+    let started = Instant::now();
+
+    tokio::time::timeout(Duration::from_secs(5), daemon.stop())
+        .await
+        .unwrap();
+
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "shutdown took {:?}",
+        started.elapsed()
+    );
+    assert_answered_for_restart(waiting).await;
 }

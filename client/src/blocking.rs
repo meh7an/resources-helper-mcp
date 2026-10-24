@@ -2,10 +2,12 @@
 
 use rh_shared::{
     api::{
-        AcquireRequest, AcquireResponse, CanFitRequest, HealthResponse, HeartbeatResponse,
-        JobSummary, LeaseQuery, ReleaseResponse, Verdict,
+        AcquireRequest, AcquireResponse, BindRequest, CanFitRequest, HealthResponse,
+        HeartbeatResponse, JobSummary, KillResponse, LeaseQuery, ReleaseResponse, RemoveResponse,
+        Verdict,
     },
     types::{Holder, JobRun, Lease, LeaseId, SessionKey, SessionUsage, Snapshot},
+    ui::{Notice, UiState},
 };
 use tokio::runtime::{Builder, Runtime};
 
@@ -111,6 +113,62 @@ impl BlockingClient {
     /// As [`Client::release`].
     pub fn release(&self, id: LeaseId, session: &SessionKey) -> Result<ReleaseResponse> {
         self.runtime.block_on(self.client.release(id, session))
+    }
+
+    /// See [`Client::bind`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::bind`].
+    pub fn bind(&self, id: LeaseId, session: &SessionKey, request: &BindRequest) -> Result<()> {
+        self.runtime
+            .block_on(self.client.bind(id, session, request))
+    }
+
+    /// See [`Client::kill`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::kill`].
+    pub fn kill(&self, id: LeaseId) -> Result<KillResponse> {
+        self.runtime.block_on(self.client.kill(id))
+    }
+
+    /// See [`Client::remove`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::remove`].
+    pub fn remove(&self, id: LeaseId) -> Result<RemoveResponse> {
+        self.runtime.block_on(self.client.remove(id))
+    }
+
+    /// See [`Client::notices`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::notices`].
+    pub fn notices(&self, session: &SessionKey) -> Result<Vec<Notice>> {
+        self.runtime.block_on(self.client.notices(session))
+    }
+
+    /// See [`Client::mark_delivered`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::mark_delivered`].
+    pub fn mark_delivered(&self, id: LeaseId, session: &SessionKey) -> Result<bool> {
+        self.runtime
+            .block_on(self.client.mark_delivered(id, session))
+    }
+
+    /// See [`Client::ui_state`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::ui_state`].
+    pub fn ui_state(&self) -> Result<UiState> {
+        self.runtime.block_on(self.client.ui_state())
     }
 
     /// See [`Client::leases`].

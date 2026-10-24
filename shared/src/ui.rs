@@ -72,8 +72,9 @@ pub struct JobProcess {
     pub name: String,
     /// Full path of the executable, for its icon; `None` when it could not be read.
     pub exe: Option<String>,
-    /// Whether this is the root of the command's bound process tree, the only tree a kill
-    /// ends. `false` means it is the session's busiest process, shown for display only.
+    /// Whether it belongs to the command's bound process tree, the only tree a kill ends: its
+    /// busiest process, or its root while the tree is idle. `false` means it is the session's
+    /// busiest process, shown for display only.
     pub bound: bool,
 }
 

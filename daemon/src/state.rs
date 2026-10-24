@@ -2,7 +2,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, PoisonError, RwLock},
+    sync::{
+        Arc, Mutex, PoisonError, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -30,6 +33,8 @@ pub struct Latest {
     pub snapshot: Snapshot,
     /// Every running process, for liveness checks and command binding.
     pub processes: ProcessTable,
+    /// Total CPU loads of the recent samples, oldest first, for the flyout's sparkline.
+    pub cpu_history_pct: Vec<f32>,
 }
 
 /// The configuration in effect and what is built from it; replaced as a whole on reload.
@@ -68,6 +73,8 @@ pub struct Shared {
     config_error: Mutex<Option<String>>,
     latest: RwLock<Option<Arc<Latest>>>,
     sessions: Mutex<HashMap<SessionKey, Holder>>,
+    /// Whether this run already recorded a first session, which spares a write per acquire.
+    first_session_noted: AtomicBool,
 }
 
 impl Shared {
@@ -85,6 +92,7 @@ impl Shared {
             config_error: Mutex::new(None),
             latest: RwLock::new(None),
             sessions: Mutex::new(HashMap::new()),
+            first_session_noted: AtomicBool::new(false),
         }
     }
 
@@ -142,6 +150,23 @@ impl Shared {
     /// The heartbeat TTL in effect.
     pub fn heartbeat_ttl(&self) -> Duration {
         Duration::from_secs(self.settings().config.leases.heartbeat_ttl_secs)
+    }
+
+    /// Registers a session that contacted the daemon, and records when the first session of
+    /// this install did, which ends the tray's first run. A failed write is logged and tried
+    /// again on the next contact.
+    pub async fn connect(&self, holder: Holder) {
+        self.register(holder);
+        if self.first_session_noted.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let noted = self
+            .with_db(|conn| repo::note_first_session(conn, now_ms()))
+            .await;
+        if let Err(error) = noted {
+            self.first_session_noted.store(false, Ordering::Relaxed);
+            tracing::error!("recording the first session failed: {error:#}");
+        }
     }
 
     /// Adds or refreshes a session.

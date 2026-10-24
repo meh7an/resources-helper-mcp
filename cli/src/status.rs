@@ -10,12 +10,15 @@ use rh_client::BlockingClient;
 use rh_shared::{
     api::{HealthResponse, LeaseQuery},
     types::{JobClass, Lease, LeaseState, ResourceUsage, SessionKey, Snapshot},
+    ui::Notice,
 };
 
 const SNAPSHOT_WAIT: Duration = Duration::from_secs(5);
 const SNAPSHOT_POLL: Duration = Duration::from_millis(200);
 const HISTORY_SHOWN: usize = 20;
 const SESSION_ID_SHOWN: usize = 8;
+// Kills and removals older than this are history, not status.
+const NOTICES_SHOWN_MS: i64 = 60 * 60 * 1_000;
 
 /// Prints machine usage, every session with its leases, and the rest. Starts rhd when it is
 /// not running.
@@ -28,8 +31,21 @@ pub fn status() -> anyhow::Result<()> {
     let snapshot = snapshot_when_ready(&client)?;
     let health = client.health()?;
     let leases = current_leases(&client)?;
-    print!("{}", format_status(&health, &snapshot, &leases, now_ms()));
+    let notices = recent_notices(&client)?;
+    print!(
+        "{}",
+        format_status(&health, &snapshot, &leases, &notices, now_ms())
+    );
     Ok(())
+}
+
+/// The newest kills and removals; none from an rhd built before they existed.
+fn recent_notices(client: &BlockingClient) -> anyhow::Result<Vec<Notice>> {
+    match client.ui_state() {
+        Ok(state) => Ok(state.notices),
+        Err(error) if error.status() == Some(404) => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Prints active and queued leases, or with `all` the most recent ones in any state.
@@ -89,6 +105,7 @@ fn format_status(
     health: &HealthResponse,
     snapshot: &Snapshot,
     leases: &[Lease],
+    notices: &[Notice],
     now_ms: i64,
 ) -> String {
     let cpu = snapshot.cpu.usage_pct;
@@ -156,6 +173,29 @@ fn format_status(
         "other              {}\n",
         format_usage(&snapshot.unattributed)
     ));
+
+    let recent: Vec<&Notice> = notices
+        .iter()
+        .filter(|notice| now_ms - notice.ended_at_ms <= NOTICES_SHOWN_MS)
+        .collect();
+    if !recent.is_empty() {
+        text.push_str("\nstopped by the user\n");
+    }
+    for notice in recent {
+        let told = if notice.delivered_at_ms.is_some() {
+            ""
+        } else {
+            "  (session not told yet)"
+        };
+        text.push_str(&format!(
+            "  {}  lease {:<4} {:<8} {} ago  {}{told}\n",
+            short(&notice.session),
+            notice.lease_id.0,
+            notice.cause.as_str(),
+            duration(now_ms - notice.ended_at_ms),
+            notice.command
+        ));
+    }
     text
 }
 
@@ -178,10 +218,15 @@ fn format_lease(lease: &Lease, now_ms: i64) -> String {
         _ => lease.ended_at_ms,
     };
     let age = since.map_or_else(String::new, |at| format!(" for {}", duration(now_ms - at)));
+    // A kill or removal is stored as expired; the cause is what the user wants to see.
+    let shown_state = lease
+        .end_cause
+        .filter(|cause| cause.is_notice())
+        .map_or(lease.state.as_str(), |cause| cause.as_str());
     let mut text = format!(
         "lease {:<4} {:<8} {:<9} {:.1} cores, {}",
         lease.id.0,
-        lease.state.as_str(),
+        shown_state,
         class,
         profile.cores,
         gb(profile.ram_mb)
@@ -226,7 +271,7 @@ pub(crate) fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use rh_shared::types::{
-        CpuStats, Holder, JobProfile, LeaseId, LeaseKind, MemStats, Rolling, SessionUsage,
+        CpuStats, EndCause, Holder, JobProfile, LeaseId, LeaseKind, MemStats, Rolling, SessionUsage,
     };
 
     use super::*;
@@ -311,7 +356,7 @@ mod tests {
             lease(12, "3f2a9c1e-aaaa-bbbb", LeaseState::Active),
             lease(13, "77777777-cccc", LeaseState::Queued),
         ];
-        let text = format_status(&health, &snapshot(), &leases, 62_000);
+        let text = format_status(&health, &snapshot(), &leases, &[], 62_000);
         assert!(
             text.starts_with("rhd 0.1.0 (pid 1234, up 1h 02m)\n"),
             "{text}"
@@ -333,6 +378,41 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("config"), "{text}");
+        assert!(!text.contains("stopped by the user"), "{text}");
+    }
+
+    #[test]
+    fn test_format_status_lists_kills_and_removals_of_the_last_hour() {
+        let health = HealthResponse {
+            version: "0.2.0".into(),
+            pid: 1_234,
+            uptime_secs: 5,
+            config_error: None,
+        };
+        let notice = |lease_id, cause, ended_at_ms, delivered_at_ms| Notice {
+            lease_id: LeaseId(lease_id),
+            session: SessionKey("3f2a9c1e-aaaa-bbbb".into()),
+            cause,
+            command: "cargo clippy".into(),
+            ended_at_ms,
+            delivered_at_ms,
+        };
+        let now = 10_000_000;
+        let notices = [
+            notice(39, EndCause::Killed, now - 240_000, None),
+            notice(38, EndCause::Removed, now - 600_000, Some(now - 590_000)),
+            notice(37, EndCause::Killed, now - NOTICES_SHOWN_MS - 1, None),
+        ];
+        let text = format_status(&health, &snapshot(), &[], &notices, now);
+        assert!(
+            text.contains(
+                "stopped by the user\n  3f2a9c1e  lease 39   killed   4m 00s ago  cargo clippy  \
+                 (session not told yet)\n  3f2a9c1e  lease 38   removed  10m 00s ago  cargo \
+                 clippy\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("lease 37"), "{text}");
     }
 
     #[test]
@@ -343,7 +423,7 @@ mod tests {
             uptime_secs: 5,
             config_error: Some("config.toml: invalid configuration: x".into()),
         };
-        let text = format_status(&health, &snapshot(), &[], 0);
+        let text = format_status(&health, &snapshot(), &[], &[], 0);
         assert!(
             text.contains("config  REJECTED, still using the previous one: config.toml:"),
             "{text}"
@@ -358,6 +438,19 @@ mod tests {
         let text = format_lease(&gpu_lease, 31_000);
         assert!(text.contains(", gpu 80%, vram 4.0 GB for 30s"), "{text}");
         assert!(!format_lease(&lease(2, "s", LeaseState::Active), 0).contains("gpu"));
+    }
+
+    #[test]
+    fn test_format_lease_shows_a_kill_or_removal_instead_of_expired() {
+        let ended = |cause| Lease {
+            state: LeaseState::Expired,
+            ended_at_ms: Some(2_000),
+            end_cause: Some(cause),
+            ..lease(3, "s", LeaseState::Expired)
+        };
+        assert!(format_lease(&ended(EndCause::Killed), 3_000).starts_with("lease 3    killed   "));
+        assert!(format_lease(&ended(EndCause::Removed), 3_000).starts_with("lease 3    removed  "));
+        assert!(format_lease(&ended(EndCause::Expired), 3_000).starts_with("lease 3    expired  "));
     }
 
     #[test]

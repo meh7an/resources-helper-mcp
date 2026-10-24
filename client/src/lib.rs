@@ -16,13 +16,15 @@ use std::{
 use reqwest::{RequestBuilder, Response};
 use rh_shared::{
     api::{
-        AcquireRequest, AcquireResponse, CanFitRequest, HealthResponse, HeartbeatResponse,
-        HistoryResponse, HistoryRunsResponse, JobSummary, LeaseQuery, LeasesResponse,
-        RegisterSessionRequest, ReleaseResponse, SessionsResponse, Verdict, WaitRequest,
+        AcquireRequest, AcquireResponse, BindRequest, CanFitRequest, DeliveredResponse,
+        HealthResponse, HeartbeatResponse, HistoryResponse, HistoryRunsResponse, JobSummary,
+        KillResponse, LeaseQuery, LeasesResponse, NoticesResponse, RegisterSessionRequest,
+        ReleaseResponse, RemoveResponse, SessionsResponse, Verdict, WaitRequest,
     },
     config::Config,
     paths::Paths,
     types::{Holder, JobRun, Lease, LeaseId, SessionKey, SessionUsage, Snapshot},
+    ui::{Notice, UiState},
 };
 use serde::de::DeserializeOwned;
 
@@ -36,6 +38,8 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 /// The request timeout [`ClientOptions::discover`] uses.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(100);
+// A kill terminates the tree in up to three sweeps, waiting for each process to exit.
+const KILL_WAIT: Duration = Duration::from_secs(30);
 
 /// Where the bearer token comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +270,91 @@ impl Client {
             .execute(|http, token| http.delete(&url).bearer_auth(token))
             .await?;
         decode(response).await
+    }
+
+    /// `POST /leases/{id}/bind`: the command under the lease's tool call `tool_use_id` is about
+    /// to run.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `Http` with 403 for another session's lease, 404 for an unknown
+    /// one, 409 when the lease is not active.
+    pub async fn bind(
+        &self,
+        id: LeaseId,
+        session: &SessionKey,
+        request: &BindRequest,
+    ) -> Result<()> {
+        let path = format!("/leases/{}/bind?session={}", id.0, encode(&session.0));
+        let url = self.url(&path);
+        self.execute(|http, token| http.post(&url).bearer_auth(token).json(request))
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /leases/{id}/kill`: ends an active lease of any session and terminates its bound
+    /// process tree. The request may stay open while the tree is terminated.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `Http` with 404 for an unknown lease, 409 for a queued or ended
+    /// one or a refused kill, 503 before the first sample.
+    pub async fn kill(&self, id: LeaseId) -> Result<KillResponse> {
+        let url = self.url(&format!("/leases/{}/kill", id.0));
+        let timeout = self.options.request_timeout + KILL_WAIT;
+        let response = self
+            .execute(|http, token| http.post(&url).bearer_auth(token).timeout(timeout))
+            .await?;
+        decode(response).await
+    }
+
+    /// `POST /leases/{id}/remove`: ends a queued lease of any session before it starts.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `Http` with 404 for an unknown lease, 409 for an active or ended
+    /// one.
+    pub async fn remove(&self, id: LeaseId) -> Result<RemoveResponse> {
+        let url = self.url(&format!("/leases/{}/remove", id.0));
+        let response = self
+            .execute(|http, token| http.post(&url).bearer_auth(token))
+            .await?;
+        decode(response).await
+    }
+
+    /// `GET /notices`: kills and removals `session` has not been told about, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`].
+    pub async fn notices(&self, session: &SessionKey) -> Result<Vec<Notice>> {
+        let path = format!("/notices?session={}", encode(&session.0));
+        Ok(self.get::<NoticesResponse>(&path).await?.notices)
+    }
+
+    /// `POST /notices/{id}/delivered`. Returns `false` when an earlier call already recorded
+    /// the delivery.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `Http` with 403 for another session's lease, 404 for an unknown
+    /// one.
+    pub async fn mark_delivered(&self, id: LeaseId, session: &SessionKey) -> Result<bool> {
+        let path = format!("/notices/{}/delivered?session={}", id.0, encode(&session.0));
+        let url = self.url(&path);
+        let response = self
+            .execute(|http, token| http.post(&url).bearer_auth(token))
+            .await?;
+        Ok(decode::<DeliveredResponse>(response).await?.delivered)
+    }
+
+    /// `GET /ui/state`: everything the tray flyout shows.
+    ///
+    /// # Errors
+    ///
+    /// Any [`ClientError`]; `Http` with status 503 before the first sample.
+    pub async fn ui_state(&self) -> Result<UiState> {
+        self.get("/ui/state").await
     }
 
     /// `GET /leases`, oldest first.
