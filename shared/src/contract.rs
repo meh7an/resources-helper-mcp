@@ -1,13 +1,15 @@
 //! Golden files for the tray app: the JSON Schema of [`UiState`] and one fixture per flyout
-//! scenario, kept in `contract/` at the repository root.
+//! scenario, kept in `contract/` at the repository root, and the C# types generated from the
+//! schema in the tray's logic library.
 //!
 //! The tests fail when a file no longer matches the types. Rerun them with
-//! `RH_UPDATE_CONTRACT=1` to rewrite the files, then review the diff and regenerate the C#
-//! types.
+//! `RH_UPDATE_CONTRACT=1` to rewrite the files, then review the diff.
+
+mod csharp;
 
 use std::{env, fs, path::PathBuf};
 
-use schemars::generate::SchemaSettings;
+use schemars::{Schema, generate::SchemaSettings};
 use serde::Serialize;
 
 use crate::{
@@ -23,7 +25,8 @@ use crate::{
 };
 
 const UPDATE_VAR: &str = "RH_UPDATE_CONTRACT";
-const SCHEMA_FILE: &str = "ui-state.schema.json";
+const SCHEMA_FILE: &str = "contract/ui-state.schema.json";
+const CSHARP_FILE: &str = "tray/src/ResourcesHelper.Tray.Core/Contract/UiState.g.cs";
 
 // 2026-10-24 06:52 UTC; every scenario is built relative to it.
 const NOW_MS: i64 = 1_792_824_720_000;
@@ -33,13 +36,14 @@ const TRAINER: &str = "b81d44f0-5a3e-4d2b-9c61-0e7f2a9d3c15";
 const APP: &str = "3f2a9c1e-77b0-4f6e-a2d8-5c9e1b4f7a02";
 const IDLE: &str = "7c19e2aa-0d4b-4c8f-b3e5-9a6f2d1c8e47";
 
-fn contract_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../contract")
+fn repo_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-/// Compares `actual` with the committed file, or rewrites the file when updating.
+/// Compares `actual` with the committed file at `relative` to the repository root, or rewrites
+/// the file when updating.
 fn assert_matches_file(relative: &str, actual: &str) {
-    let path = contract_dir().join(relative);
+    let path = repo_dir().join(relative);
     if env::var_os(UPDATE_VAR).is_some() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, actual).unwrap();
@@ -486,19 +490,27 @@ fn scenarios() -> [(&'static str, UiState); 4] {
     ]
 }
 
+fn ui_state_schema() -> Schema {
+    SchemaSettings::draft07()
+        .into_generator()
+        .into_root_schema_for::<UiState>()
+}
+
 #[test]
 fn test_ui_state_schema_matches_committed_file() {
-    let schema = SchemaSettings::draft07()
-        .into_generator()
-        .into_root_schema_for::<UiState>();
-    assert_matches_file(SCHEMA_FILE, &pretty_json(&schema));
+    assert_matches_file(SCHEMA_FILE, &pretty_json(&ui_state_schema()));
+}
+
+#[test]
+fn test_csharp_types_match_committed_file() {
+    assert_matches_file(CSHARP_FILE, &csharp::emit(ui_state_schema().as_value()));
 }
 
 #[test]
 fn test_ui_state_fixtures_match_committed_files() {
     for (name, state) in scenarios() {
         assert_matches_file(
-            &format!("fixtures/ui-state-{name}.json"),
+            &format!("contract/fixtures/ui-state-{name}.json"),
             &pretty_json(&state),
         );
     }

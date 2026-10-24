@@ -18,4 +18,9 @@
     <ProjectReference Include="..\..\src\ResourcesHelper.Tray.Core\ResourcesHelper.Tray.Core.csproj" />
   </ItemGroup>
 
+  <!-- The golden UiState fixtures written by the Rust contract tests (rh-shared). -->
+  <ItemGroup>
+    <None Include="..\..\..\contract\fixtures\*.json" LinkBase="Fixtures" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
