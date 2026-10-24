@@ -97,19 +97,26 @@ started before the MCP server was registered: tell the user to restart the sessi
 
 ## Waiting on a queued lease
 
+A queued lease always waits. Never ask the user whether to queue or keep waiting, however
+long or unknown the wait; the queue is how the machine is shared, and the user cancels from
+the Resources Helper tray app if they want to.
+
 1. Tell the user in one line what is ahead and for how long, from the result's `verdict`:
    its `reasons` and `wait_estimate_secs`. `list_leases` with `all_sessions` shows the leases
    ahead and their labels.
-2. If `wait_estimate_secs` is over 600 or missing (unknown wait, or a request the machine can
-   never fit), ask the user whether to keep waiting or give up. Waiting keeps the place;
-   giving up is `release_lease`. A reason saying "more than the machine can free" will never
-   fit: offer a smaller custom profile or a narrower command instead.
-3. Keep waiting by calling `acquire_lease` again with only `lease_id` (and `wait_secs`, up to
+2. Keep waiting by calling `acquire_lease` again with only `lease_id` (and `wait_secs`, up to
    120). It holds the same place in the queue, returns as soon as the lease starts, and its
    `verdict` is fresh each time. Do not sleep in the shell between calls, and never request a
    new lease for the same work. Do light work that does not depend on the command's result
    between calls if there is any.
+3. A reason saying "more than the machine can free" will never fit: release that lease and
+   acquire again at once with a custom profile within what the reasons say the machine can
+   free (or a narrower command), and say so in one line. Do not ask.
 4. Once a call returns `active`, run the command, then release it as usual.
+5. If the lease ends without ever starting, the user removed it from the queue (or its
+   session expired): do not run the command, do not acquire it again, and tell the user in
+   one line that the queued command was cancelled. Continue with any work that does not need
+   it.
 
 ## Reading the machine
 
@@ -179,7 +186,9 @@ Keep it to one line per event, in plain words:
 
 - Queued: "Waiting for a build slot: 1 lease ahead (`cargo build` in another session),
   about 3 min. I'll start when it's granted."
-- Long or unknown wait: say why (from `reasons`) and ask whether to keep waiting.
+- Long or unknown wait: say why (from `reasons`) in the same one line, then keep waiting.
+- Removed from the queue: "The queued `cargo build` was cancelled from Resources Helper, so I
+  didn't run it."
 - Benchmark: "Waiting for a quiet machine for the benchmark; other sessions' builds are
   held until it finishes." Once it ends, give the noise report with the results.
 - Granted after a wait: "Lease granted after 2 min; running `cargo test`."
